@@ -1,0 +1,1822 @@
+#!/usr/bin/env python3
+"""musicbox — pemutar musik TUI.
+
+Dibuat karena menu fzf di `music` berpindah-pindah layar dan tidak bisa diklik
+atau di-scroll. Ini panel sungguhan ala btop: layout menyesuaikan ukuran
+jendela, mouse jalan, dan warnanya mengikuti skema Caelestia.
+
+Bagian:
+  MpvPlayer  — mesin pemutar. mpv dijalankan sekali dalam mode idle lalu
+               dikendalikan lewat JSON IPC. Berbeda dari `music` yang meng-exec
+               mpv di depan; mode idle memungkinkan kendali penuh dari UI.
+  Library    — pindai ~/Music, baca tag dengan mutagen, cache ke JSON.
+  MusicBox   — aplikasi Textual.
+
+Unduhan sengaja memanggil `music -d` alih-alih menulis ulang perintah yt-dlp:
+flag di sana sudah teruji (mp3 vs opus, embed sampul/metadata, dan jebakan
+file .mp3 yang isinya sebenarnya AAC). Dua salinan berarti dua tempat yang
+bisa menyimpang.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import random
+import shutil
+import subprocess
+import time
+from pathlib import Path
+
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
+from textual.message import Message
+from textual.reactive import reactive
+from textual.widgets import (DataTable, Footer, Header, Input, Static,
+                             TabbedContent, TabPane, Tree)
+
+# ---------------------------------------------------------------- konstanta
+
+HOME = Path.home()
+MUSIC_DIR = Path(os.environ.get("MUSIC_DIR", HOME / "Music"))
+STATE_DIR = HOME / ".local/share/musicbox"
+LIBRARY_CACHE = STATE_DIR / "library.json"
+RESUME_FILE = STATE_DIR / "resume.json"
+DOWNLOADS_LOG = STATE_DIR / "downloads.json"
+QUEUE_FILE = STATE_DIR / "queue.json"
+PLAYLIST_DIR = STATE_DIR / "playlists"
+SCHEME_FILE = HOME / ".local/state/caelestia/scheme.json"
+RUNTIME = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
+MPV_SOCKET = RUNTIME / "musicbox-mpv.sock"
+
+AUDIO_EXT = {".mp3", ".m4a", ".opus", ".flac", ".ogg", ".oga", ".wav", ".aac", ".wma"}
+
+# Warna cadangan kalau Caelestia belum pernah menghasilkan skema.
+FALLBACK = {
+    "surface": "1c1c1c", "surfaceContainer": "262626", "surfaceContainerHigh": "303030",
+    "onSurface": "e6e6e6", "onSurfaceVariant": "a8a8a8", "primary": "89b4fa",
+    "outline": "6c6c6c", "error": "f38ba8",
+}
+
+
+def fmt_time(seconds: float | None) -> str:
+    if not seconds or seconds < 0:
+        return "--:--"
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+# ------------------------------------------------------------------ pemutar
+
+
+class MpvPlayer:
+    """Bungkus mpv yang berjalan terus dalam mode idle.
+
+    Kenapa idle: proses mpv tetap hidup di antara lagu, jadi status pemutaran
+    bisa dipantau dan dikendalikan kapan saja lewat socket. Diverifikasi pada
+    mpv v0.41.0 — `idle-active` merespons `true`.
+    """
+
+    def __init__(self) -> None:
+        self.proc: subprocess.Popen | None = None
+        self.reader: asyncio.StreamReader | None = None
+        self.writer: asyncio.StreamWriter | None = None
+        self.mpris = False
+        self._req_id = 0
+        self.state: dict = {
+            "path": None, "title": None, "pause": True,
+            "time-pos": 0.0, "duration": 0.0, "volume": 70.0,
+        }
+        self.on_update = None  # callback tanpa argumen, dipanggil tiap state berubah
+
+    @staticmethod
+    def _mpris_script() -> str | None:
+        """Cari plugin mpv-mpris kalau terpasang.
+
+        Tanpa ini musicbox tidak terlihat oleh siapa pun di desktop. Dengan ini
+        ia muncul di widget media Caelestia lengkap dengan judul dan kendali —
+        `Players.qml:18` bahkan menyebut mpv-mpris secara eksplisit di
+        komentarnya, jadi memang sudah diantisipasi.
+        """
+        for candidate in ("/usr/lib/mpv/mpris.so", "/usr/lib/mpv-mpris/mpris.so",
+                          "/usr/share/mpv/scripts/mpris.so"):
+            if Path(candidate).exists():
+                return candidate
+        return None
+
+    async def start(self) -> None:
+        MPV_SOCKET.parent.mkdir(parents=True, exist_ok=True)
+        MPV_SOCKET.unlink(missing_ok=True)
+        args = ["mpv", "--idle=yes", "--no-video", "--really-quiet",
+                "--volume=70", f"--input-ipc-server={MPV_SOCKET}",
+                # Fallback ke `best` wajib: live stream YouTube tidak punya
+                # format audio-only, jadi `bestaudio` sendirian akan gagal.
+                "--ytdl-format=bestaudio/best"]
+        script = self._mpris_script()
+        if script:
+            args.append(f"--script={script}")
+        self.mpris = bool(script)
+        self.proc = subprocess.Popen(
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        # Socket dibuat mpv beberapa saat setelah proses hidup.
+        for _ in range(100):
+            if MPV_SOCKET.exists():
+                break
+            await asyncio.sleep(0.05)
+        self.reader, self.writer = await asyncio.open_unix_connection(str(MPV_SOCKET))
+        for prop in ("path", "media-title", "pause", "time-pos", "duration", "volume"):
+            await self._send({"command": ["observe_property", 1, prop]})
+        asyncio.create_task(self._read_loop())
+
+    async def _send(self, payload: dict) -> None:
+        if not self.writer:
+            return
+        self._req_id += 1
+        payload.setdefault("request_id", self._req_id)
+        try:
+            self.writer.write((json.dumps(payload) + "\n").encode())
+            await self.writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+    async def _read_loop(self) -> None:
+        assert self.reader
+        while True:
+            try:
+                line = await self.reader.readline()
+            except (ConnectionResetError, asyncio.IncompleteReadError):
+                break
+            if not line:
+                break
+            try:
+                msg = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if msg.get("event") == "property-change":
+                name, data = msg.get("name"), msg.get("data")
+                if name == "media-title":
+                    self.state["title"] = data
+                elif name in self.state:
+                    self.state[name] = data
+                if self.on_update:
+                    self.on_update()
+
+    # -- perintah ---------------------------------------------------------
+
+    async def play(self, target: str) -> None:
+        await self._send({"command": ["loadfile", target, "replace"]})
+        await self._send({"command": ["set_property", "pause", False]})
+
+    async def load_paused(self, target: str, position: float = 0.0) -> None:
+        """Muat lagu dalam keadaan jeda pada posisi tertentu.
+
+        `start` diberikan sebagai opsi per-file supaya mpv langsung membuka di
+        posisi itu, bukan memutar dari awal lalu melompat.
+        """
+        opts = {"pause": "yes"}
+        if position > 1:
+            opts["start"] = str(int(position))
+        await self._send({"command": ["loadfile", target, "replace", -1, opts]})
+
+    async def append(self, target: str) -> None:
+        await self._send({"command": ["loadfile", target, "append-play"]})
+
+    async def toggle_pause(self) -> None:
+        await self._send({"command": ["cycle", "pause"]})
+
+    async def next_track(self) -> None:
+        await self._send({"command": ["playlist-next", "force"]})
+
+    async def prev_track(self) -> None:
+        await self._send({"command": ["playlist-prev", "force"]})
+
+    async def stop(self) -> None:
+        await self._send({"command": ["stop"]})
+
+    async def seek(self, delta: int) -> None:
+        await self._send({"command": ["seek", delta, "relative"]})
+
+    async def seek_fraction(self, frac: float) -> None:
+        """Lompat ke posisi 0..1 dari durasi. Dipakai saat bar diklik."""
+        await self._send({"command": ["seek", max(0.0, min(1.0, frac)) * 100,
+                                      "absolute-percent"]})
+
+    async def set_volume(self, delta: int) -> None:
+        vol = max(0, min(130, (self.state.get("volume") or 70) + delta))
+        await self._send({"command": ["set_property", "volume", vol]})
+
+    async def set_volume_abs(self, vol: float) -> None:
+        await self._send({"command": ["set_property", "volume",
+                                      max(0.0, min(130.0, vol))]})
+
+    def shutdown(self) -> None:
+        if self.proc and self.proc.poll() is None:
+            self.proc.terminate()
+        MPV_SOCKET.unlink(missing_ok=True)
+
+
+# ------------------------------------------------------------------ library
+
+
+class Library:
+    """Daftar lagu di ~/Music beserta tag-nya.
+
+    Hasil pindaian di-cache supaya start berikutnya tidak membaca ulang semua
+    file. Cache dianggap basi kalau mtime direktori berubah.
+    """
+
+    def __init__(self) -> None:
+        self.tracks: list[dict] = []
+
+    def scan(self, force: bool = False) -> list[dict]:
+        if not MUSIC_DIR.is_dir():
+            self.tracks = []
+            return self.tracks
+        dir_mtime = MUSIC_DIR.stat().st_mtime
+        if not force and LIBRARY_CACHE.exists():
+            try:
+                cached = json.loads(LIBRARY_CACHE.read_text())
+                if cached.get("mtime") == dir_mtime:
+                    self.tracks = cached["tracks"]
+                    return self.tracks
+            except (json.JSONDecodeError, KeyError, OSError):
+                pass
+
+        tracks = []
+        for f in sorted(MUSIC_DIR.iterdir()):
+            if not f.is_file() or f.suffix.lower() not in AUDIO_EXT:
+                continue
+            tracks.append(self._read_tags(f))
+        self.tracks = tracks
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        LIBRARY_CACHE.write_text(json.dumps({"mtime": dir_mtime, "tracks": tracks}))
+        return tracks
+
+    @staticmethod
+    def _read_tags(path: Path) -> dict:
+        title, artist, dur = path.stem, "", 0.0
+        try:
+            from mutagen import File as MutagenFile
+
+            m = MutagenFile(path, easy=True)
+            if m is not None:
+                if m.info is not None:
+                    dur = float(getattr(m.info, "length", 0.0) or 0.0)
+                title = (m.get("title") or [title])[0]
+                artist = (m.get("artist") or [""])[0]
+        except Exception:
+            # Tag rusak atau format tak dikenal bukan alasan menyembunyikan
+            # lagunya — tampilkan apa adanya dengan nama file.
+            pass
+        return {"path": str(path), "title": title, "artist": artist, "duration": dur}
+
+
+# ------------------------------------------------------------------- sampul
+
+COVER_CACHE = STATE_DIR / "covers"
+
+
+def extract_cover(path: Path) -> Path | None:
+    """Ambil sampul yang tertanam di file audio.
+
+    mutagen menyimpan gambar di tempat berbeda tergantung format: APIC untuk
+    ID3 (mp3), `covr` untuk MP4/M4A, dan `pictures` untuk FLAC/Opus. Ketiganya
+    ditangani supaya semua file di ~/Music punya peluang menampilkan sampul.
+    """
+    COVER_CACHE.mkdir(parents=True, exist_ok=True)
+    out = COVER_CACHE / (str(abs(hash(str(path)))) + ".png")
+    if out.exists():
+        return out
+    try:
+        from mutagen import File as MutagenFile
+
+        audio = MutagenFile(path)
+        if audio is None:
+            return None
+        data = None
+        tags = getattr(audio, "tags", None)
+        if tags is not None:
+            for key in tags.keys():
+                if key.startswith("APIC"):
+                    data = tags[key].data
+                    break
+            if data is None and "covr" in tags:
+                covr = tags["covr"]
+                data = bytes(covr[0]) if covr else None
+        if data is None:
+            pics = getattr(audio, "pictures", None)
+            if pics:
+                data = pics[0].data
+        if data is None and tags is not None and "metadata_block_picture" in tags:
+            # Ogg/Opus menyimpan sampul sebagai blok Picture FLAC yang
+            # di-base64 di dalam Vorbis comment — bukan APIC maupun .pictures.
+            # Tanpa cabang ini semua unduhan format opus kehilangan sampulnya.
+            import base64
+
+            from mutagen.flac import Picture
+
+            for blob in tags["metadata_block_picture"]:
+                try:
+                    data = Picture(base64.b64decode(blob)).data
+                    break
+                except Exception:
+                    continue
+        if not data:
+            return None
+        out.write_bytes(data)
+        return out
+    except Exception:
+        return None
+
+
+def fetch_thumbnail(video_id: str) -> Path | None:
+    """Unduh thumbnail YouTube. Ukuran mq sudah cukup untuk panel selebar 36."""
+    COVER_CACHE.mkdir(parents=True, exist_ok=True)
+    out = COVER_CACHE / f"yt-{video_id}.jpg"
+    if out.exists():
+        return out
+    try:
+        subprocess.run(
+            ["curl", "-sL", "--max-time", "15", "-o", str(out),
+             f"https://i.ytimg.com/vi/{video_id}/mqdefault.jpg"],
+            check=True, capture_output=True, timeout=20)
+        return out if out.exists() and out.stat().st_size > 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+# ------------------------------------------------------------------ youtube
+
+
+def yt_search(query: str, limit: int = 20) -> list[dict]:
+    """Cari lagu di YouTube lewat yt-dlp.
+
+    Format --print memakai TAB SUNGGUHAN: `yt-dlp --print` tidak menafsirkan
+    "\\t" dan akan mencetaknya sebagai dua huruf literal. Sama persis dengan
+    pick_video() di skrip `music`.
+    """
+    tab = "\t"
+    fmt = tab.join(("%(id)s", "%(duration>%H:%M:%S)s", "%(uploader).24s", "%(title).80s"))
+    try:
+        out = subprocess.run(
+            ["yt-dlp", "--skip-download", "--no-warnings", "--flat-playlist",
+             "--print", fmt, f"ytsearch{limit}:{query}"],
+            capture_output=True, text=True, timeout=180,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    results = []
+    for line in out.splitlines():
+        parts = line.split(tab)
+        if len(parts) == 4:
+            results.append({"id": parts[0], "duration": parts[1],
+                            "uploader": parts[2], "title": parts[3]})
+    return results
+
+
+def yt_url(video_id: str) -> str:
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def yt_radio_url(video_id: str) -> str:
+    """Playlist Mix YouTube — rekomendasi berantai, ratusan lagu."""
+    return f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
+
+
+# -------------------------------------------------------------------- tema
+
+
+def load_scheme() -> dict:
+    """Ambil palet Caelestia. Kunci Material You, 120 warna."""
+    try:
+        return json.loads(SCHEME_FILE.read_text()).get("colours", {}) or FALLBACK
+    except (OSError, json.JSONDecodeError):
+        return FALLBACK
+
+
+# --------------------------------------------------------------- aplikasi
+
+
+class SeekBar(Static):
+    """Bar posisi yang bisa diklik dan diseret.
+
+    ProgressBar bawaan Textual tidak punya handler mouse sama sekali, jadi
+    dibuat sendiri: render manual, lalu terjemahkan koordinat x klik menjadi
+    fraksi durasi.
+    """
+
+    position: reactive[float] = reactive(0.0)
+
+    class Seek(Message):
+        def __init__(self, fraction: float) -> None:
+            self.fraction = fraction
+            super().__init__()
+
+    def render(self) -> str:
+        width = max(1, self.size.width)
+        filled = int(width * max(0.0, min(1.0, self.position)))
+        if filled >= width:
+            return "━" * width
+        return "━" * filled + "╸" + "─" * (width - filled - 1)
+
+    def _emit(self, x: int) -> None:
+        self.post_message(self.Seek(x / max(1, self.size.width)))
+
+    def on_click(self, event) -> None:
+        self._emit(event.x)
+
+    def on_mouse_down(self, event) -> None:
+        self.capture_mouse()
+
+    def on_mouse_move(self, event) -> None:
+        # Hanya saat tombol ditekan — seret untuk menggeser posisi.
+        if self.app.mouse_captured is self and event.button:
+            self._emit(event.x)
+
+    def on_mouse_up(self, event) -> None:
+        self.release_mouse()
+
+
+class CavaBars(Static):
+    """Visualizer yang membaca keluaran mentah cava.
+
+    cava dijalankan dengan config sementara ber-output `raw` ascii ke stdout,
+    lalu barisnya dibaca dan digambar sebagai balok. Sengaja tidak menulis
+    ulang analisis FFT — cava sudah melakukannya, dan warnanya pun sudah
+    otomatis mengikuti skema Caelestia lewat apply_cava() di theme.py.
+    """
+
+    BLOCKS = " ▁▂▃▄▅▆▇█"
+    # Tinggi dalam baris. Satu baris terasa sempit dan gerakannya tidak
+    # terbaca; beberapa baris memberi ruang seperti visualizer Caelestia.
+    ROWS = 7
+    # Nilai mentah cava dipetakan ke ROWS*8 level supaya tiap baris punya
+    # delapan tingkat blok — geraknya jadi halus, bukan melompat.
+    LEVELS = ROWS * 8
+
+    def __init__(self, bars: int = 40, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.bars = bars
+        self.values: list[int] = [0] * bars
+        self.proc: asyncio.subprocess.Process | None = None
+        self._cfg: Path | None = None
+
+    async def on_mount(self) -> None:
+        if shutil.which("cava") is None:
+            self.update("cava belum terpasang")
+            return
+        await self._start()
+
+    async def _start(self) -> None:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self._cfg = STATE_DIR / "cava-raw.conf"
+        # ascii_max_range disamakan dengan jumlah level blok supaya nilai bisa
+        # dipetakan langsung tanpa penskalaan tambahan.
+        self._cfg.write_text(
+            "[general]\n"
+            "framerate = 30\n"
+            f"bars = {self.bars}\n"
+            "[output]\n"
+            "method = raw\n"
+            "raw_target = /dev/stdout\n"
+            "data_format = ascii\n"
+            f"ascii_max_range = {self.LEVELS}\n"
+        )
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                "cava", "-p", str(self._cfg),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+        except OSError:
+            self.update("cava gagal dijalankan")
+            return
+        asyncio.create_task(self._read_loop())
+
+    async def _read_loop(self) -> None:
+        assert self.proc and self.proc.stdout
+        while True:
+            try:
+                line = await self.proc.stdout.readline()
+            except (asyncio.IncompleteReadError, ValueError):
+                break
+            if not line:
+                break
+            parts = line.decode(errors="ignore").strip().rstrip(";").split(";")
+            try:
+                self.values = [int(p) for p in parts if p != ""]
+            except ValueError:
+                continue
+            self.refresh()
+
+    def render(self) -> str:
+        """Gambar balok vertikal setinggi ROWS baris.
+
+        Tiap bar diberi jarak satu kolom supaya terbaca sebagai balok terpisah,
+        bukan dinding rapat. Jumlah bar dihitung dari lebar widget sehingga
+        layout tetap benar saat jendela diubah ukurannya.
+        """
+        if not self.values:
+            return "\n" * (self.ROWS - 1)
+        width = max(1, self.size.width)
+        slots = max(1, (width + 1) // 2)  # satu kolom bar, satu kolom spasi
+
+        vals = self.values
+        if len(vals) != slots:
+            step = len(vals) / slots
+            vals = [vals[min(len(vals) - 1, int(i * step))] for i in range(slots)]
+
+        lines = []
+        for row in range(self.ROWS - 1, -1, -1):
+            floor_ = row * 8
+            cells = []
+            for v in vals:
+                level = max(0, min(self.LEVELS, v)) - floor_
+                if level <= 0:
+                    cells.append(" ")
+                elif level >= 8:
+                    cells.append("█")
+                else:
+                    cells.append(self.BLOCKS[level])
+            lines.append(" ".join(cells))
+        return "\n".join(lines)
+
+    def stop(self) -> None:
+        if self.proc and self.proc.returncode is None:
+            self.proc.terminate()
+        self.proc = None
+
+    async def restart(self) -> None:
+        self.stop()
+        await self._start()
+
+
+class VolumeBar(Static):
+    """Slider volume, sama mekanismenya dengan SeekBar."""
+
+    level: reactive[float] = reactive(0.7)
+
+    class Changed(Message):
+        def __init__(self, fraction: float, show: bool = False) -> None:
+            self.fraction = fraction
+            self.show = show  # tampilkan angka persen (dipakai saat scroll)
+            super().__init__()
+
+    def render(self) -> str:
+        width = max(1, self.size.width)
+        filled = int(width * max(0.0, min(1.0, self.level)))
+        return "━" * filled + "─" * (width - filled)
+
+    def _emit(self, x: int) -> None:
+        self.post_message(self.Changed(x / max(1, self.size.width)))
+
+    def on_click(self, event) -> None:
+        self._emit(event.x)
+
+    def on_mouse_down(self, event) -> None:
+        self.capture_mouse()
+
+    def on_mouse_move(self, event) -> None:
+        if self.app.mouse_captured is self and event.button:
+            self._emit(event.x)
+
+    def on_mouse_up(self, event) -> None:
+        self.release_mouse()
+
+    # Scroll di atas bar untuk mengatur volume. Angka persennya hanya muncul
+    # saat digulir lalu hilang sendiri, supaya bar tetap bersih saat diam.
+    def on_mouse_scroll_up(self, event) -> None:
+        event.stop()
+        self.post_message(self.Changed(min(1.0, self.level + 0.05), show=True))
+
+    def on_mouse_scroll_down(self, event) -> None:
+        event.stop()
+        self.post_message(self.Changed(max(0.0, self.level - 0.05), show=True))
+
+
+class TransportButton(Static):
+    """Ikon kendali yang bisa diklik.
+
+    Dipakai alih-alih Button bawaan Textual: Button membawa border dan padding
+    sendiri yang membuat baris kendali terlihat berat, sedangkan yang dicari
+    adalah ikon polos seperti pemutar musik pada umumnya.
+    """
+
+    class Pressed(Message):
+        def __init__(self, action: str) -> None:
+            self.action = action
+            super().__init__()
+
+    def __init__(self, glyph: str, action: str, **kwargs) -> None:
+        super().__init__(glyph, **kwargs)
+        self.action_name = action
+
+    def on_click(self) -> None:
+        self.post_message(self.Pressed(self.action_name))
+
+
+class NowPlaying(Static):
+    """Bar bawah: judul, kendali, waktu, dan posisi yang bisa diklik."""
+
+    def compose(self) -> ComposeResult:
+        yield Static("tidak ada yang diputar", id="np-title")
+        with Horizontal(id="np-controls"):
+            yield TransportButton("⏮", "prev", classes="tbtn")
+            yield TransportButton("⏸", "pause", id="btn-pause", classes="tbtn")
+            yield TransportButton("⏭", "next", classes="tbtn")
+            yield TransportButton("⏹", "stop", classes="tbtn")
+            yield TransportButton("⇄", "shuffle", classes="tbtn")
+            # Label tombol status ikut berubah, bukan cuma warnanya, supaya
+            # kondisi hidup/mati terbaca tanpa harus menebak dari warna.
+            yield TransportButton("↻ auto", "autoplay", id="btn-auto", classes="tbtn wide on")
+            yield TransportButton("◫ cava", "cava", id="btn-cava", classes="tbtn wide on")
+            yield Static("🕪", id="vol-label")
+            yield VolumeBar(id="vol-bar")
+        with Horizontal(id="np-row"):
+            yield Static("--:--", id="np-elapsed")
+            yield SeekBar(id="np-bar")
+            yield Static("--:--", id="np-total")
+
+
+class PlaylistNameScreen(ModalScreen[str | None]):
+    """Dialog kecil untuk memberi nama album."""
+
+    BINDINGS = [Binding("escape", "cancel", "Batal")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Static("Nama album baru")
+            yield Input(placeholder="mis. santai malam", id="pl-name")
+
+    def on_mount(self) -> None:
+        self.query_one("#pl-name", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.dismiss(event.value.strip() or None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class AlbumPicker(ModalScreen[str | None]):
+    """Pilih album tujuan, atau buat baru.
+
+    Sebelumnya menambahkan lagu ke album mengharuskan pindah tab dan menyorot
+    albumnya dulu — dua langkah terpisah yang mudah salah. Dialog ini muncul
+    langsung dari Library/Cari sehingga alurnya satu tarikan napas.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Batal")]
+
+    def __init__(self, albums: list[str]) -> None:
+        super().__init__()
+        self.albums = albums
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Static("Tambahkan ke album")
+            table = DataTable(id="album-pick", cursor_type="row")
+            yield table
+
+    def on_mount(self) -> None:
+        table = self.query_one("#album-pick", DataTable)
+        table.add_columns("Album")
+        table.add_row("＋ buat album baru")
+        for a in self.albums:
+            table.add_row(a)
+        table.focus()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        idx = event.cursor_row
+        # Baris 0 selalu "buat baru"; sisanya indeks album dikurangi satu.
+        self.dismiss("" if idx == 0 else self.albums[idx - 1])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class MusicBox(App):
+    TITLE = "musicbox"
+    SUB_TITLE = "library"
+
+    # Tema bawaan Textual (`textual-dark`) mengecat latar dengan warna solid,
+    # sehingga transparansi terminal hilang. `ansi-dark` memakai warna ANSI
+    # terminal dan tidak mengecat latar — itulah yang membuat wallpaper tembus.
+    theme = "ansi-dark"
+
+    # Matikan seleksi teks. Di btop bar posisi tidak bisa di-blok; tanpa ini
+    # klik-seret pada seek bar malah menyorot teks alih-alih menggeser lagu.
+    ALLOW_SELECT = False
+
+    # `background: transparent` membuat Textual tidak mengecat latar sama
+    # sekali, sehingga transparansi terminal (foot alpha=0.78) tembus sampai
+    # ke wallpaper — sama seperti btop. Kalau diberi warna, sekecil apa pun,
+    # latarnya jadi solid dan efeknya hilang.
+    CSS = """
+    Screen { background: transparent; color: $cae-on-surface; }
+    Vertical { background: transparent; }
+    Header { background: transparent; color: $cae-primary; text-style: bold; }
+    Footer { background: transparent; color: $cae-on-variant; }
+    Footer > .footer-key--key { color: $cae-primary; background: transparent; }
+    Footer > .footer-key--description { color: $cae-on-variant; background: transparent; }
+
+    /* Area isi memuai, bar kendali tetap menempel di bawah. Tanpa 1fr di
+       sini, mematikan cava membuat bar kendali ikut naik ke tengah. */
+    #main { height: 1fr; background: transparent; }
+    #tabs { width: 1fr; height: 1fr; background: transparent; }
+
+    /* Panel kanan berisi rincian lagu yang sedang disorot. Lebarnya tetap
+       supaya daftar lagu tidak ikut menyempit-melebar saat isinya berubah. */
+    #pltree {
+        height: 1fr;
+        background: transparent;
+        border: round $cae-outline;
+        color: $cae-on-surface;
+        scrollbar-background: transparent;
+        scrollbar-color: $cae-primary;
+        scrollbar-size-vertical: 1;
+    }
+    #pltree > .tree--cursor { background: $cae-primary; color: $cae-surface; }
+    #pltree > .tree--guides { color: $cae-outline; }
+    #pltree > .tree--guides-selected { color: $cae-primary; }
+
+    /* Dialog nama playlist. Latar layar diberi kabut supaya fokus jelas. */
+    PlaylistNameScreen { align: center middle; }
+    PlaylistNameScreen > #dialog {
+        width: 46;
+        height: auto;
+        padding: 1 2;
+        background: $cae-container;
+        border: round $cae-primary;
+    }
+
+    #info {
+        width: 36;
+        height: 1fr;
+        background: transparent;
+        border: round $cae-outline;
+        padding: 1 2;
+        color: $cae-on-variant;
+    }
+    /* Tinggi sampul dipatok supaya teks di bawahnya tidak melompat-lompat
+       saat berpindah antar lagu dengan rasio gambar berbeda. */
+    #cover { height: 14; width: 1fr; background: transparent; }
+    #cover Image { width: 1fr; height: 14; }
+    #info-text { height: auto; background: transparent; }
+    #song-actions { height: auto; background: transparent; margin-top: 1; }
+    .song-act {
+        width: 1fr;
+        height: 1;
+        color: $cae-on-variant;
+        background: transparent;
+        content-align: left middle;
+    }
+    .song-act:hover { color: $cae-primary; text-style: bold; }
+    TabPane { background: transparent; padding: 0; }
+    Tabs { background: transparent; }
+    Tab { color: $cae-on-variant; }
+    Tab.-active { color: $cae-primary; text-style: bold; }
+    Underline > .underline--bar { color: $cae-primary; }
+
+    #yt-input {
+        background: transparent;
+        border: round $cae-outline;
+        color: $cae-on-surface;
+    }
+    #yt-input:focus { border: round $cae-primary; }
+
+    /* Digayakan lewat tipe widget, BUKAN per-id. Menyebut #library dan
+       #results satu per satu membuat setiap tabel baru (mis. Unduhan) jatuh
+       ke warna bawaan tema ansi — khaki pekat yang menenggelamkan teksnya.
+       Bug yang sama sudah terulang dua kali sebelum diperbaiki di akarnya. */
+    DataTable {
+        height: 1fr;
+        background: transparent;
+        border: round $cae-outline;
+        scrollbar-background: transparent;
+        scrollbar-color: $cae-primary;
+        scrollbar-size-vertical: 1;
+    }
+    DataTable > .datatable--header {
+        background: transparent;
+        color: $cae-on-variant;
+        text-style: bold;
+    }
+    DataTable > .datatable--cursor { background: $cae-primary; color: $cae-surface; }
+    DataTable > .datatable--hover { background: $cae-container-high; }
+
+    CavaBars {
+        height: 7;
+        background: transparent;
+        color: $cae-primary;
+        margin: 1 1 0 1;
+        content-align: center middle;
+    }
+
+    #np-controls { height: 1; align-horizontal: center; }
+    .tbtn {
+        width: 5;
+        content-align: center middle;
+        color: $cae-on-variant;
+        background: transparent;
+    }
+    .tbtn.wide { width: 9; }
+    .tbtn:hover { color: $cae-primary; text-style: bold; }
+    /* Tombol status: menyala saat aktif, redup saat mati. */
+    .tbtn.on { color: $cae-primary; text-style: bold; }
+    .tbtn.off { color: $cae-outline; }
+
+    #vol-label { width: 5; color: $cae-on-variant; content-align: right middle; }
+    #vol-bar { width: 14; color: $cae-primary; background: transparent; margin: 0 1; }
+
+    /* Notifikasi: ikut tema, dan dibuat sekecil mungkin. Bawaan Textual
+       memakai lebar tetap yang besar dan menutupi kendali di bawahnya. */
+    Toast {
+        background: $cae-container;
+        color: $cae-on-surface;
+        border: none;
+        border-left: thick $cae-primary;
+        width: auto;
+        max-width: 34;
+        min-width: 0;
+        height: auto;
+        padding: 0 1;
+        margin: 0 1 0 0;
+    }
+    Toast .toast--title { display: none; }
+    /* Ditempatkan di kanan ATAS supaya tidak menimpa bar kendali. */
+    ToastRack { align: right top; }
+
+    NowPlaying {
+        height: auto;
+        background: transparent;
+        border: round $cae-outline;
+        padding: 0 1;
+    }
+    #np-title { color: $cae-primary; text-style: bold; background: transparent; }
+    #np-row { height: 1; background: transparent; }
+    #np-elapsed, #np-total { width: 8; color: $cae-on-variant; background: transparent; }
+    #np-bar { width: 1fr; color: $cae-primary; background: transparent; }
+    """
+
+    BINDINGS = [
+        Binding("space", "toggle_pause", "Play/Pause"),
+        Binding("n", "next", "Berikut"),
+        Binding("p", "prev", "Sebelum"),
+        Binding("s", "stop", "Stop"),
+        Binding("right", "seek_fwd", "+5s", show=False),
+        Binding("left", "seek_back", "-5s", show=False),
+        Binding("plus,equals_sign", "vol_up", "Vol+", show=False),
+        Binding("minus", "vol_down", "Vol-", show=False),
+        Binding("z", "shuffle", "Acak"),
+        Binding("a", "toggle_autoplay", "Autoplay"),
+        Binding("c", "toggle_cava", "Visualizer"),
+        Binding("d", "download", show=False, description="Unduh"),
+        Binding("f", "toggle_format", show=False, description="mp3/opus"),
+        Binding("R", "radio", show=False, description="Radio"),
+        Binding("x", "delete_track", show=False, description="Hapus"),
+        Binding("e", "enqueue", show=False, description="+Antrean"),
+        Binding("E", "dequeue", "−Antrean", show=False),
+        Binding("ctrl+up", "queue_up", "Naik", show=False),
+        Binding("ctrl+down", "queue_down", "Turun", show=False),
+        Binding("P", "play_queue", show=False, description="Putar antrean"),
+        Binding("S", "new_playlist", "Album baru"),
+        Binding("A", "add_to_playlist", show=False, description="+ke album"),
+        Binding("X", "delete_playlist", "Hapus album", show=False),
+        Binding("D", "remove_from_album", "Hapus dari album", show=False),
+        Binding("r", "rescan", "Pindai ulang"),
+        Binding("q", "quit", "Keluar"),
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.player = MpvPlayer()
+        self.library = Library()
+        self.autoplay = True
+        self.cava_on = True
+        self.results: list[dict] = []
+        self.dl_format = "mp3"
+        self._pending_delete: str | None = None
+        self._pending_add: dict | None = None
+        self.image_ok = True
+        self.downloads: list[dict] = []
+        self.queue: list[dict] = []
+        self.playlists: dict[str, list] = {}
+        self._scheme_mtime = 0.0
+
+    # -- tema -------------------------------------------------------------
+
+    def get_css_variables(self) -> dict[str, str]:
+        """Suntikkan palet Caelestia sebagai variabel CSS Textual.
+
+        Dipakai lewat $cae-* di CSS di atas. Textual memanggil ini ulang saat
+        refresh_css(), jadi ganti wallpaper cukup memicu refresh tanpa restart.
+        """
+        variables = super().get_css_variables()
+        c = load_scheme()
+
+        def col(key: str, fallback: str) -> str:
+            return "#" + (c.get(key) or FALLBACK.get(key) or fallback)
+
+        variables.update({
+            "cae-surface": col("surface", "1c1c1c"),
+            "cae-container": col("surfaceContainer", "262626"),
+            "cae-container-high": col("surfaceContainerHigh", "303030"),
+            "cae-on-surface": col("onSurface", "e6e6e6"),
+            "cae-on-variant": col("onSurfaceVariant", "a8a8a8"),
+            "cae-primary": col("primary", "89b4fa"),
+            "cae-outline": col("outline", "6c6c6c"),
+            "cae-error": col("error", "f38ba8"),
+        })
+        return variables
+
+    def _watch_scheme(self) -> None:
+        try:
+            mtime = SCHEME_FILE.stat().st_mtime
+        except OSError:
+            return
+        if mtime != self._scheme_mtime:
+            self._scheme_mtime = mtime
+            self.refresh_css()
+
+    # -- susunan ----------------------------------------------------------
+
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Vertical():
+            with Horizontal(id="main"):
+                with TabbedContent(id="tabs"):
+                    with TabPane("Library", id="tab-lib"):
+                        yield DataTable(id="library", cursor_type="row", zebra_stripes=False)
+                    with TabPane("Cari", id="tab-yt"):
+                        yield Input(placeholder="cari di YouTube lalu tekan Enter…",
+                                    id="yt-input")
+                        yield DataTable(id="results", cursor_type="row", zebra_stripes=False)
+                    with TabPane("Antrean", id="tab-queue"):
+                        yield DataTable(id="queue", cursor_type="row",
+                                        zebra_stripes=False)
+                    with TabPane("Album", id="tab-pl"):
+                        yield Tree("album", id="pltree")
+                    with TabPane("Unduhan", id="tab-dl"):
+                        yield DataTable(id="downloads", cursor_type="row",
+                                        zebra_stripes=False)
+                with Vertical(id="info"):
+                    yield Static(id="cover")
+                    yield Static(id="info-text")
+                    # Aksi khusus LAGU tinggal di sini, terpisah dari bar bawah
+                    # yang khusus kendali PEMUTARAN. Sebelumnya keduanya
+                    # bercampur di footer dan sulit dibedakan mana yang mana.
+                    yield Vertical(id="song-actions")
+            yield CavaBars(id="cava")
+            yield NowPlaying()
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#library", DataTable)
+        table.add_columns("Judul", "Artis", "Durasi")
+        self.query_one("#results", DataTable).add_columns("Judul", "Kanal", "Durasi")
+        self.query_one("#downloads", DataTable).add_columns("Judul", "Format", "Status", "Waktu")
+        self.query_one("#queue", DataTable).add_columns("#", "Judul", "Sumber")
+        self.load_downloads()
+        self.load_queue()
+        self.load_playlists()
+        self.load_library()
+
+        await self.player.start()
+        self.player.on_update = self._schedule_refresh
+
+        await self.restore_resume()
+
+        self.set_interval(0.5, self.refresh_now_playing)
+        self.set_interval(2.0, self._watch_scheme)
+        try:
+            self._scheme_mtime = SCHEME_FILE.stat().st_mtime
+        except OSError:
+            pass
+
+    def _schedule_refresh(self) -> None:
+        # Dipanggil dari task pembaca IPC; jadwalkan di loop UI.
+        self.call_later(self.refresh_now_playing)
+
+    # -- data -------------------------------------------------------------
+
+    def load_library(self, force: bool = False) -> None:
+        table = self.query_one("#library", DataTable)
+        table.clear()
+        tracks = self.library.scan(force=force)
+        for t in tracks:
+            table.add_row(t["title"], t["artist"] or "—", fmt_time(t["duration"]))
+        self.sub_title = f"library — {len(tracks)} lagu"
+        if not tracks:
+            self.notify(f"{MUSIC_DIR} kosong. Unduh dengan: music -d \"judul\"",
+                        severity="warning", timeout=8)
+
+    def refresh_now_playing(self) -> None:
+        st = self.player.state
+        title = st.get("title") or "tidak ada yang diputar"
+        if st.get("pause") and st.get("path"):
+            title = f"⏸  {title}"
+        elif st.get("path"):
+            title = f"▶  {title}"
+        # Timer 0,5 detik ini terus berdetak sampai aplikasi benar-benar mati,
+        # termasuk sesaat setelah widget dilepas saat keluar. Tanpa penjaga di
+        # sini query_one melempar NoMatches dan aplikasi crash ketika ditutup.
+        try:
+            self.query_one("#np-title", Static).update(title)
+            pos = st.get("time-pos") or 0.0
+            dur = st.get("duration") or 0.0
+            self.query_one("#np-elapsed", Static).update(fmt_time(pos))
+            self.query_one("#np-total", Static).update(fmt_time(dur))
+            self.query_one("#np-bar", SeekBar).position = (pos / dur) if dur else 0.0
+        # Volume disinkronkan dari mpv, bukan hanya diset saat diklik — tanpa
+        # ini bar-nya tidak pernah bergerak walau volumenya benar-benar berubah
+        # (mis. lewat tombol +/- atau saat mpv baru mulai).
+            self.query_one("#vol-bar", VolumeBar).level = (st.get("volume") or 0) / 130.0
+        except Exception:
+            return
+
+    async def on_seek_bar_seek(self, message: SeekBar.Seek) -> None:
+        await self.player.seek_fraction(message.fraction)
+
+    # -- aksi -------------------------------------------------------------
+
+    # -- pencarian YouTube -------------------------------------------------
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        query = event.value.strip()
+        if not query:
+            return
+        self.notify("mencari…", timeout=2)
+        # yt-dlp butuh belasan detik; dijalankan di thread supaya UI tidak beku.
+        self.run_worker(lambda: yt_search(query), thread=True,
+                        name="ytsearch", group="yt", exit_on_error=False)
+
+    def on_worker_state_changed(self, event) -> None:
+        from textual.worker import WorkerState
+
+        if event.state is not WorkerState.SUCCESS:
+            return
+        if event.worker.name == "thumb":
+            vid, path = event.worker.result or (None, None)
+            # Abaikan kalau kursor sudah pindah ke lagu lain sejak unduhan mulai.
+            cur = self._selected_result()
+            if path and cur and cur["id"] == vid:
+                self.show_cover(path)
+            return
+        if event.worker.name != "ytsearch":
+            return
+        self.results = event.worker.result or []
+        table = self.query_one("#results", DataTable)
+        table.clear()
+        for r in self.results:
+            table.add_row(r["title"], r["uploader"], r["duration"])
+        self.notify(f"{len(self.results)} hasil" if self.results else "tidak ada hasil",
+                    timeout=2)
+
+    # -- panel info --------------------------------------------------------
+
+    # Peta tab -> tabel isinya, dipakai agar panel info hanya mengikuti tab
+    # yang sedang dibuka.
+    TAB_TABLE = {"tab-lib": "library", "tab-yt": "results",
+                 "tab-queue": "queue", "tab-dl": "downloads"}
+
+    # Aksi yang hanya masuk akal di tab tertentu. Selain yang terdaftar di
+    # sini, aksi dianggap global (kendali pemutaran, keluar, dan sejenisnya).
+    TAB_ACTIONS = {
+        "tab-lib":   {"delete_track", "enqueue", "rescan", "shuffle",
+                      "add_to_playlist"},
+        "tab-yt":    {"download", "toggle_format", "radio", "enqueue",
+                      "add_to_playlist"},
+        "tab-queue": {"dequeue", "queue_up", "queue_down", "play_queue",
+                      "add_to_playlist"},
+        "tab-pl":    {"new_playlist", "delete_playlist", "remove_from_album",
+                      "add_to_playlist"},
+        "tab-dl":    set(),
+    }
+    CONTEXTUAL = set().union(*TAB_ACTIONS.values())
+
+    def check_action(self, action: str, parameters) -> bool | None:
+        """Sembunyikan aksi yang tidak relevan dengan tab yang sedang dibuka.
+
+        Footer Textual membaca hasil fungsi ini, jadi daftar tombol di bawah
+        ikut berubah per tab alih-alih menampilkan semuanya sekaligus.
+        """
+        if action not in self.CONTEXTUAL:
+            return True
+        try:
+            active = self.query_one("#tabs", TabbedContent).active
+        except Exception:
+            return True
+        return action in self.TAB_ACTIONS.get(active, set())
+
+    def _active_table(self) -> str | None:
+        try:
+            return self.TAB_TABLE.get(self.query_one("#tabs", TabbedContent).active)
+        except Exception:
+            return None
+
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        # Tabel yang tidak terlihat tetap memancarkan event saat isinya
+        # berubah; tanpa saringan ini panel info bisa menampilkan lagu dari
+        # tab lain — misalnya rincian library padahal sedang di tab Unduhan.
+        if event.data_table.id != self._active_table():
+            return
+        self.update_info(event.data_table.id, event.cursor_row)
+
+    def on_tabbed_content_tab_activated(self, event) -> None:
+        table_id = self._active_table()
+        if not table_id:
+            return
+        try:
+            table = self.query_one(f"#{table_id}", DataTable)
+        except Exception:
+            return
+        self.update_info(table_id, table.cursor_row)
+
+    def show_cover(self, image_path: Path | None) -> None:
+        """Tampilkan sampul di panel kanan.
+
+        Widget gambar dibuat ulang tiap kali, bukan diganti sumbernya: cara itu
+        paling andal di terminal, karena renderer sixel menggambar di luar
+        kanvas Textual dan sisa gambar lama bisa tertinggal.
+        """
+        holder = self.query_one("#cover", Static)
+        holder.remove_children()
+        if not image_path or not self.image_ok:
+            holder.display = False
+            return
+        try:
+            # SixelImage dipaksa, bukan AutoImage. Deteksi otomatis di
+            # textual-image jatuh ke renderer blok Unicode di terminal ini —
+            # hasilnya kotak-kotak kasar, bukan foto. foot mendukung sixel
+            # (grafik sungguhan), jadi renderer itu dipilih langsung dan
+            # AutoImage hanya dipakai sebagai cadangan.
+            try:
+                from textual_image.widget import SixelImage as ImageWidget
+            except ImportError:
+                from textual_image.widget import Image as ImageWidget
+
+            holder.display = True
+            holder.mount(ImageWidget(str(image_path)))
+        except Exception:
+            # Terminal tanpa dukungan gambar tidak boleh membuat aplikasi mati;
+            # panel cukup kembali ke teks saja.
+            holder.display = False
+            self.image_ok = False
+
+    # Aksi lagu per konteks: (label, nama aksi). Ditaruh di panel kanan, bukan
+    # di footer, supaya jelas mana yang bekerja pada LAGU dan mana yang pada
+    # PEMUTARAN.
+    SONG_ACTIONS = {
+        "library":   [("▶  putar", "play_selected"), ("＋ antrean", "enqueue"),
+                      ("♪  album", "add_to_playlist"), ("✕  hapus file", "delete_track")],
+        "results":   [("▶  putar", "play_selected"), ("📻 radio", "radio"),
+                      ("＋ antrean", "enqueue"), ("♪  album", "add_to_playlist"),
+                      ("⬇  unduh", "download")],
+        "queue":     [("▶  putar antrean", "play_queue"), ("♪  album", "add_to_playlist"),
+                      ("✕  keluarkan", "dequeue")],
+        "downloads": [],
+    }
+
+    def rebuild_song_actions(self, table_id: str | None) -> None:
+        box = self.query_one("#song-actions", Vertical)
+        box.remove_children()
+        for label, action in self.SONG_ACTIONS.get(table_id or "", []):
+            box.mount(TransportButton(label, action, classes="song-act"))
+
+    async def action_play_selected(self) -> None:
+        """Putar lagu yang sedang disorot, dari tab mana pun."""
+        song = self._selected_song()
+        if song:
+            await self.player.play(song["target"])
+
+    def update_info(self, table_id: str, idx: int) -> None:
+        """Isi panel kanan sesuai baris yang sedang disorot."""
+        info = self.query_one("#info-text", Static)
+        self.rebuild_song_actions(table_id)
+        lines: list[str] = []
+        if table_id == "library" and 0 <= idx < len(self.library.tracks):
+            t = self.library.tracks[idx]
+            p = Path(t["path"])
+            size = p.stat().st_size / 1e6 if p.exists() else 0
+            self.show_cover(extract_cover(p))
+            lines = [
+                f"[b]{t['title']}[/b]", "",
+                f"artis    {t['artist'] or '—'}",
+                f"durasi   {fmt_time(t['duration'])}",
+                f"format   {p.suffix.lstrip('.') or '—'}",
+                f"ukuran   {size:.1f} MB",
+                "", f"[dim]{p.name}[/dim]",
+            ]
+        elif table_id == "results" and 0 <= idx < len(self.results):
+            r = self.results[idx]
+            # Thumbnail diunduh di thread supaya UI tidak beku saat menyorot
+            # cepat-cepat melewati daftar hasil.
+            vid = r["id"]
+            self.run_worker(lambda: (vid, fetch_thumbnail(vid)), thread=True,
+                            name="thumb", group="thumb", exit_on_error=False)
+            lines = [
+                f"[b]{r['title']}[/b]", "",
+                f"kanal    {r['uploader']}",
+                f"durasi   {r['duration']}",
+                "", f"[dim]{yt_url(r['id'])}[/dim]",
+                "", "[dim]enter putar · d unduh · R radio[/dim]",
+            ]
+        elif table_id == "downloads" and 0 <= idx < len(self.downloads):
+            d = self.downloads[idx]
+            lines = [
+                f"[b]{d.get('title', '?')}[/b]", "",
+                f"format   {d.get('format', '?')}",
+                f"status   {d.get('status', '?')}",
+                f"waktu    {d.get('time', '?')}",
+                "", f"[dim]{d.get('url', '')}[/dim]",
+            ]
+        info.update("\n".join(lines))
+
+    # -- antrean -----------------------------------------------------------
+
+    def load_queue(self) -> None:
+        try:
+            self.queue = json.loads(QUEUE_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            self.queue = []
+        self.refresh_queue_table()
+
+    def save_queue(self) -> None:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            QUEUE_FILE.write_text(json.dumps(self.queue, indent=1))
+        except OSError:
+            pass
+
+    def refresh_queue_table(self) -> None:
+        table = self.query_one("#queue", DataTable)
+        keep = table.cursor_row
+        table.clear()
+        for i, q in enumerate(self.queue, 1):
+            table.add_row(str(i), q.get("title", "?"), q.get("source", "lokal"))
+        if 0 <= keep < len(self.queue):
+            table.move_cursor(row=keep)
+
+    def enqueue(self, title: str, target: str, source: str = "lokal") -> None:
+        self.queue.append({"title": title, "target": target, "source": source})
+        self.save_queue()
+        self.refresh_queue_table()
+        self.notify(f"antrean +1 ({len(self.queue)})", timeout=2)
+
+    def action_enqueue(self) -> None:
+        """Tambah baris yang sedang disorot ke antrean."""
+        active = self._active_table()
+        if active == "library":
+            idx = self.query_one("#library", DataTable).cursor_row
+            if 0 <= idx < len(self.library.tracks):
+                t = self.library.tracks[idx]
+                item = {"title": t["title"], "target": t["path"], "source": "lokal"}
+                self._pending_add = item
+                self.enqueue(**item)
+        elif active == "results":
+            r = self._selected_result()
+            if r:
+                item = {"title": r["title"], "target": yt_url(r["id"]),
+                        "source": "youtube"}
+                self._pending_add = item
+                self.enqueue(**item)
+        else:
+            self.notify("pilih dari Library atau Cari", timeout=3)
+
+    def action_dequeue(self) -> None:
+        if self._active_table() != "queue":
+            return
+        idx = self.query_one("#queue", DataTable).cursor_row
+        if 0 <= idx < len(self.queue):
+            self.queue.pop(idx)
+            self.save_queue()
+            self.refresh_queue_table()
+
+    def _move_in_queue(self, delta: int) -> None:
+        if self._active_table() != "queue":
+            return
+        table = self.query_one("#queue", DataTable)
+        i = table.cursor_row
+        j = i + delta
+        if 0 <= i < len(self.queue) and 0 <= j < len(self.queue):
+            self.queue[i], self.queue[j] = self.queue[j], self.queue[i]
+            self.save_queue()
+            self.refresh_queue_table()
+            table.move_cursor(row=j)
+
+    def action_queue_up(self) -> None:
+        self._move_in_queue(-1)
+
+    def action_queue_down(self) -> None:
+        self._move_in_queue(1)
+
+    async def action_play_queue(self) -> None:
+        """Putar antrean dari awal, sisanya diantrekan ke playlist mpv."""
+        if not self.queue:
+            self.notify("antrean kosong", timeout=2)
+            return
+        await self.player.play(self.queue[0]["target"])
+        for q in self.queue[1:]:
+            await self.player.append(q["target"])
+        self.notify(f"memutar antrean ({len(self.queue)})", timeout=2)
+
+    # -- playlist tersimpan ------------------------------------------------
+
+    def load_playlists(self) -> None:
+        """Muat semua playlist dan gambarkan sebagai tree.
+
+        Bentuk tree dipilih karena satu playlist berisi banyak lagu — daftar
+        datar akan mencampur nama playlist dengan isinya. Node induk bisa
+        dilipat, persis seperti pohon berkas di editor kode.
+        """
+        PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
+        self.playlists = {}
+        for f in sorted(PLAYLIST_DIR.glob("*.json")):
+            try:
+                self.playlists[f.stem] = json.loads(f.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+
+        tree = self.query_one("#pltree", Tree)
+        tree.clear()
+        tree.root.label = f"album ({len(self.playlists)})"
+        tree.root.expand()
+        for name, items in self.playlists.items():
+            node = tree.root.add(f"{name}  ({len(items)})", data={"playlist": name})
+            for it in items:
+                node.add_leaf(it.get("title", "?"),
+                              data={"playlist": name, "item": it})
+
+    def action_new_playlist(self) -> None:
+        """Buat playlist baru yang kosong.
+
+        Alurnya sengaja begini, bukan "simpan antrean sebagai playlist": kamu
+        membuat wadahnya dulu, lalu mengisinya lagu per lagu dari Library atau
+        Cari. Itu lebih dekat dengan cara orang menyusun playlist.
+        """
+        self.push_screen(PlaylistNameScreen(), self._do_new_playlist)
+
+    def _do_new_playlist(self, name: str | None) -> str | None:
+        if not name:
+            return None
+        # Nama file dibersihkan: hanya huruf, angka, spasi, strip.
+        safe = "".join(c for c in name if c.isalnum() or c in " -_").strip()
+        if not safe:
+            self.notify("nama tidak valid", severity="error", timeout=3)
+            return None
+        target = PLAYLIST_DIR / f"{safe}.json"
+        if target.exists():
+            self.notify("nama sudah dipakai", severity="warning", timeout=3)
+            return None
+        PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            target.write_text("[]")
+        except OSError as exc:
+            self.notify(f"gagal buat: {exc}", severity="error", timeout=4)
+            return None
+        self.load_playlists()
+        self.notify(f"album '{safe}' dibuat", timeout=3)
+        return safe
+
+    def _current_playlist(self) -> str | None:
+        node = self.query_one("#pltree", Tree).cursor_node
+        return node.data.get("playlist") if node and node.data else None
+
+    def _selected_song(self) -> dict | None:
+        """Lagu yang sedang disorot, dari tab mana pun yang aktif."""
+        active = self._active_table()
+        if active == "library":
+            idx = self.query_one("#library", DataTable).cursor_row
+            if 0 <= idx < len(self.library.tracks):
+                t = self.library.tracks[idx]
+                return {"title": t["title"], "target": t["path"], "source": "lokal"}
+        elif active == "results":
+            r = self._selected_result()
+            if r:
+                return {"title": r["title"], "target": yt_url(r["id"]),
+                        "source": "youtube"}
+        elif active == "queue":
+            idx = self.query_one("#queue", DataTable).cursor_row
+            if 0 <= idx < len(self.queue):
+                return dict(self.queue[idx])
+        return None
+
+    def action_add_to_playlist(self) -> None:
+        """Tambahkan lagu yang disorot ke album — pilih tujuannya lewat dialog."""
+        song = self._selected_song()
+        if not song:
+            self.notify("sorot lagu di Library, Cari, atau Antrean", timeout=4)
+            return
+        self._pending_add = song
+        self.push_screen(AlbumPicker(sorted(self.playlists)), self._add_to_album)
+
+    def _add_to_album(self, name: str | None) -> None:
+        if name is None:
+            return
+        if name == "":
+            # Pilihan "buat album baru": rantai ke dialog nama.
+            self.push_screen(PlaylistNameScreen(), self._new_album_with_song)
+            return
+        self._append_to_album(name, self._pending_add)
+
+    def _new_album_with_song(self, name: str | None) -> None:
+        created = self._do_new_playlist(name)
+        if created:
+            self._append_to_album(created, self._pending_add)
+
+    def _append_to_album(self, name: str, item: dict | None) -> None:
+        if not item:
+            return
+        items = list(self.playlists.get(name, []))
+        items.append(item)
+        try:
+            (PLAYLIST_DIR / f"{name}.json").write_text(json.dumps(items, indent=1))
+        except OSError as exc:
+            self.notify(f"gagal simpan: {exc}", severity="error", timeout=4)
+            return
+        self.load_playlists()
+        self.notify(f"+1 ke '{name}'", timeout=2)
+
+    def action_remove_from_album(self) -> None:
+        """Hapus satu lagu dari album (daun yang disorot di tree)."""
+        node = self.query_one("#pltree", Tree).cursor_node
+        if not node or not node.data or "item" not in node.data:
+            self.notify("sorot lagunya di dalam album", timeout=3)
+            return
+        name = node.data["playlist"]
+        target = node.data["item"].get("target")
+        items = [i for i in self.playlists.get(name, []) if i.get("target") != target]
+        try:
+            (PLAYLIST_DIR / f"{name}.json").write_text(json.dumps(items, indent=1))
+        except OSError as exc:
+            self.notify(f"gagal simpan: {exc}", severity="error", timeout=4)
+            return
+        self.load_playlists()
+        self.notify(f"dihapus dari '{name}'", timeout=2)
+
+    def action_delete_playlist(self) -> None:
+        node = self.query_one("#pltree", Tree).cursor_node
+        if not node or not node.data or "item" in node.data:
+            self.notify("pilih nama playlist-nya", timeout=3)
+            return
+        name = node.data["playlist"]
+        if self._pending_delete == f"pl:{name}":
+            try:
+                (PLAYLIST_DIR / f"{name}.json").unlink()
+            except OSError as exc:
+                self.notify(f"gagal hapus: {exc}", severity="error", timeout=4)
+                return
+            self._pending_delete = None
+            self.load_playlists()
+            self.notify("playlist dihapus", timeout=2)
+        else:
+            self._pending_delete = f"pl:{name}"
+            self.notify("tekan x lagi untuk hapus", timeout=4)
+            self.set_timer(4.0, lambda: setattr(self, "_pending_delete", None))
+
+    async def on_tree_node_selected(self, event) -> None:
+        data = event.node.data
+        if not data:
+            return
+        if "item" in data:
+            # Daun: satu lagu — langsung putar.
+            await self.player.play(data["item"]["target"])
+        else:
+            # Induk: seluruh playlist dimuat ke antrean lalu diputar.
+            self.queue = list(self.playlists.get(data["playlist"], []))
+            self.save_queue()
+            self.refresh_queue_table()
+            await self.action_play_queue()
+
+    # -- riwayat unduhan ---------------------------------------------------
+
+    def load_downloads(self) -> None:
+        try:
+            self.downloads = json.loads(DOWNLOADS_LOG.read_text())
+        except (OSError, json.JSONDecodeError):
+            self.downloads = []
+        table = self.query_one("#downloads", DataTable)
+        table.clear()
+        for d in self.downloads:
+            table.add_row(d.get("title", "?"), d.get("format", "?"),
+                          d.get("status", "?"), d.get("time", ""))
+
+    def log_download(self, entry: dict) -> None:
+        self.downloads.insert(0, entry)
+        self.downloads = self.downloads[:100]
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            DOWNLOADS_LOG.write_text(json.dumps(self.downloads, indent=1))
+        except OSError:
+            pass
+        self.query_one("#queue", DataTable).add_columns("#", "Judul", "Sumber")
+        self.load_downloads()
+        self.load_queue()
+        self.load_playlists()
+
+    def _selected_result(self) -> dict | None:
+        table = self.query_one("#results", DataTable)
+        idx = table.cursor_row
+        return self.results[idx] if 0 <= idx < len(self.results) else None
+
+    async def action_download(self) -> None:
+        """Unduh hasil terpilih lewat skrip `music`.
+
+        Perintah yt-dlp tidak ditulis ulang di sini: flag di `music -d` sudah
+        teruji (mp3/opus, embed sampul & metadata, jebakan ekstensi). Dua
+        salinan berarti dua tempat yang bisa menyimpang.
+        """
+        r = self._selected_result()
+        if not r:
+            self.notify("pilih hasil pencarian dulu", timeout=3)
+            return
+        cmd = [str(HOME / ".local/bin/music"), "-d"]
+        if self.dl_format == "opus":
+            cmd.insert(1, "-o")
+        url = yt_url(r["id"])
+        cmd.append(url)
+        fmt, title = self.dl_format, r["title"]
+        self.notify(f"unduh: {fmt}", timeout=3)
+        self.log_download({"title": title, "format": fmt, "status": "berjalan",
+                           "url": url, "time": time.strftime("%H:%M")})
+
+        def run_and_log() -> int:
+            rc = subprocess.run(cmd, capture_output=True, text=True).returncode
+            # Perbarui entri paling atas: itu unduhan yang baru saja dijalankan.
+            if self.downloads:
+                self.downloads[0]["status"] = "selesai" if rc == 0 else "gagal"
+                try:
+                    DOWNLOADS_LOG.write_text(json.dumps(self.downloads, indent=1))
+                except OSError:
+                    pass
+            return rc
+
+        self.run_worker(run_and_log, thread=True, name="download",
+                        group="yt", exit_on_error=False)
+
+    def action_toggle_format(self) -> None:
+        self.dl_format = "opus" if self.dl_format == "mp3" else "mp3"
+        self.notify(f"format: {self.dl_format}", timeout=2)
+
+    async def action_radio(self) -> None:
+        r = self._selected_result()
+        if not r:
+            self.notify("pilih hasil pencarian dulu", timeout=3)
+            return
+        await self.player.play(yt_radio_url(r["id"]))
+        self.notify("radio dimulai", timeout=2)
+
+    # -- pemutaran ---------------------------------------------------------
+
+    async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "results":
+            r = self._selected_result()
+            if r:
+                # Saat autoplay hidup, yang dimuat adalah playlist Mix (list=RD)
+                # bukan video tunggal — sehingga tombol "berikut" menyambung ke
+                # rekomendasi YouTube, persis seperti YouTube Music.
+                await self.player.play(
+                    yt_radio_url(r["id"]) if self.autoplay else yt_url(r["id"]))
+            return
+        idx = event.cursor_row
+        if not (0 <= idx < len(self.library.tracks)):
+            return
+        tracks = self.library.tracks
+        await self.player.play(tracks[idx]["path"])
+        if self.autoplay:
+            # Sisa library diantrekan ke playlist mpv supaya lagu berlanjut
+            # sendiri tanpa perlu ditekan apa-apa.
+            for t in tracks[idx + 1:] + tracks[:idx]:
+                await self.player.append(t["path"])
+
+    async def on_transport_button_pressed(self, message: TransportButton.Pressed) -> None:
+        action = message.action
+        if action == "pause":
+            await self.player.toggle_pause()
+        elif action == "next":
+            await self.player.next_track()
+        elif action == "prev":
+            await self.player.prev_track()
+        elif action == "stop":
+            await self.player.stop()
+        elif action == "shuffle":
+            await self.action_shuffle()
+        elif action == "autoplay":
+            self.action_toggle_autoplay()
+        elif action == "cava":
+            self.action_toggle_cava()
+        else:
+            # Aksi dari panel kanan (tombol lagu). Dijalankan lewat nama supaya
+            # daftar SONG_ACTIONS tetap jadi satu-satunya sumber kebenaran.
+            handler = getattr(self, f"action_{action}", None)
+            if handler:
+                result = handler()
+                if asyncio.iscoroutine(result):
+                    await result
+
+    async def on_volume_bar_changed(self, message: VolumeBar.Changed) -> None:
+        await self.player.set_volume_abs(message.fraction * 130)
+        label = self.query_one("#vol-label", Static)
+        if message.show:
+            label.update(f"{int(message.fraction * 130)}%")
+            # Kembalikan ke ikon setelah sesaat supaya bar tetap bersih.
+            self.set_timer(1.5, lambda: label.update("🕪"))
+
+    async def action_shuffle(self) -> None:
+        tracks = list(self.library.tracks)
+        if not tracks:
+            return
+        random.shuffle(tracks)
+        await self.player.play(tracks[0]["path"])
+        for t in tracks[1:]:
+            await self.player.append(t["path"])
+        self.notify("diacak", timeout=2)
+
+    def action_toggle_autoplay(self) -> None:
+        self.autoplay = not self.autoplay
+        btn = self.query_one("#btn-auto", TransportButton)
+        btn.update("↻ auto" if self.autoplay else "↻ off")
+        btn.set_class(self.autoplay, "on")
+        btn.set_class(not self.autoplay, "off")
+        self.notify("autoplay on" if self.autoplay else "autoplay off", timeout=2)
+
+    def action_toggle_cava(self) -> None:
+        """Sembunyikan visualizer sekaligus hentikan prosesnya.
+
+        Sekadar menyembunyikan widget tidak cukup — cava tetap jalan dan makan
+        ~16 MB. Prosesnya ikut dimatikan supaya benar-benar hemat.
+        """
+        cava = self.query_one("#cava", CavaBars)
+        btn = self.query_one("#btn-cava", TransportButton)
+        self.cava_on = not self.cava_on
+        cava.display = self.cava_on
+        btn.update("◫ cava" if self.cava_on else "◫ off")
+        btn.set_class(self.cava_on, "on")
+        btn.set_class(not self.cava_on, "off")
+        if self.cava_on:
+            self.run_worker(cava.restart(), exclusive=False)
+        else:
+            cava.stop()
+        self.notify("cava on" if self.cava_on else "cava off", timeout=2)
+
+    async def action_toggle_pause(self) -> None:
+        await self.player.toggle_pause()
+
+    async def action_next(self) -> None:
+        await self.player.next_track()
+
+    async def action_prev(self) -> None:
+        await self.player.prev_track()
+
+    async def action_stop(self) -> None:
+        await self.player.stop()
+
+    async def action_seek_fwd(self) -> None:
+        await self.player.seek(5)
+
+    async def action_seek_back(self) -> None:
+        await self.player.seek(-5)
+
+    async def action_vol_up(self) -> None:
+        await self.player.set_volume(5)
+
+    async def action_vol_down(self) -> None:
+        await self.player.set_volume(-5)
+
+    def action_rescan(self) -> None:
+        self.load_library(force=True)
+        self.notify("library dipindai", timeout=2)
+
+    # -- lanjut dari terakhir ---------------------------------------------
+
+    def save_resume(self) -> None:
+        """Simpan lagu dan posisi terakhir supaya bisa dilanjutkan.
+
+        Ditulis saat keluar, bukan berkala, supaya tidak menyentuh disk
+        terus-menerus selama memutar.
+        """
+        st = self.player.state
+        path = st.get("path")
+        if not path:
+            return
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            RESUME_FILE.write_text(json.dumps({
+                "path": path,
+                "position": st.get("time-pos") or 0.0,
+                "title": st.get("title") or "",
+            }))
+        except OSError:
+            pass
+
+    async def restore_resume(self) -> None:
+        try:
+            data = json.loads(RESUME_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            return
+        path, pos = data.get("path"), data.get("position") or 0.0
+        if not path:
+            return
+        # Sengaja dimuat dalam keadaan JEDA: membuka aplikasi tidak seharusnya
+        # langsung mengeluarkan suara. Tekan spasi untuk melanjutkan.
+        await self.player.load_paused(path, pos)
+        self.notify(f"lanjut: {fmt_time(pos)}", timeout=3)
+
+    def action_delete_track(self) -> None:
+        table = self.query_one("#library", DataTable)
+        idx = table.cursor_row
+        if not (0 <= idx < len(self.library.tracks)):
+            return
+        track = self.library.tracks[idx]
+        if self._pending_delete == track["path"]:
+            try:
+                Path(track["path"]).unlink()
+            except OSError as exc:
+                self.notify(f"gagal hapus: {exc}", severity="error", timeout=4)
+                return
+            self._pending_delete = None
+            self.load_library(force=True)
+            self.notify("dihapus", timeout=2)
+        else:
+            # Konfirmasi dua langkah: menghapus file tidak bisa dibatalkan.
+            self._pending_delete = track["path"]
+            self.notify("tekan x lagi untuk hapus", timeout=4)
+            self.set_timer(4.0, lambda: setattr(self, "_pending_delete", None))
+
+    def on_unmount(self) -> None:
+        self.save_resume()
+        self.player.shutdown()
+        try:
+            self.query_one("#cava", CavaBars).stop()
+        except Exception:
+            pass
+
+
+LOCK_FILE = RUNTIME / "musicbox.lock"
+
+
+def already_running() -> int | None:
+    """Kembalikan PID instans lain yang masih hidup, kalau ada.
+
+    Perlu karena semua instans memakai socket mpv yang sama; instans kedua
+    akan menimpa socket milik yang pertama sehingga yang lama kehilangan
+    kendali atas pemutarnya. Selain itu dua pemutar akan berebut audio dan
+    mendaftarkan MPRIS ganda.
+    """
+    try:
+        pid = int(LOCK_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return None
+    if pid == os.getpid():
+        return None
+    try:
+        # Signal 0 hanya memeriksa keberadaan proses, tidak mengirim apa pun.
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return None
+    try:
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="ignore")
+    except OSError:
+        return None
+    return pid if "musicbox" in cmd else None
+
+
+def main() -> int:
+    if shutil.which("mpv") is None:
+        print("mpv belum terpasang", flush=True)
+        return 1
+
+    other = already_running()
+    if other:
+        print(f"musicbox sudah berjalan (pid {other}).", flush=True)
+        print("Gunakan jendela yang sudah terbuka, atau Super+Alt+M untuk memunculkannya.",
+              flush=True)
+        return 1
+
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        LOCK_FILE.write_text(str(os.getpid()))
+    except OSError:
+        pass
+    try:
+        MusicBox().run()
+    finally:
+        # Hanya hapus kalau lock ini memang milik kita — mencegah instans lain
+        # kehilangan lock-nya saat proses ini berakhir.
+        try:
+            if LOCK_FILE.read_text().strip() == str(os.getpid()):
+                LOCK_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

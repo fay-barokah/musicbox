@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+# music — pemutar & pengunduh musik berbasis mpv + yt-dlp.
+#
+# Kenapa skrip terpisah, bukan ~/.config/mpv/mpv.conf: config global akan ikut
+# mengubah mpv saat dipakai menonton video. Ini hanya memengaruhi musik.
+#
+# Pemakaian:
+#   music -p                  PANEL: menu + visualizer cava dalam satu jendela
+#   music -i                  menu interaktif saja (tanpa visualizer)
+#   music                     putar semua lagu di ~/Music, acak
+#   music "judul"             cari YouTube, putar hasil pertama (audio saja)
+#   music -r "judul"          RADIO: putar mix rekomendasi berantai dari YouTube
+#   music -d "judul"          UNDUH ke ~/Music sebagai mp3, lalu selesai
+#   music -s "judul"          CARI lalu pilih dari daftar (fzf), baru putar
+#   music -s -d "judul"       cari, pilih, lalu unduh
+#   music -s -r "judul"       cari, pilih, jadikan titik awal radio
+#   music <url>               putar URL (YouTube/SoundCloud/live stream)
+#   music -v <url|judul>      sama, tapi tampilkan video
+#
+# Format unduhan: default mp3 (paling kompatibel). Tambahkan -o untuk opus —
+# itu format asli YouTube sehingga TIDAK di-transcode: jauh lebih cepat dan
+# lebih kecil. Terukur di mesin ini: mp3 quality 0 ~223 kbps, opus ~141 kbps,
+# jadi sekitar 60%% ukuran mp3 dengan kualitas per-bit lebih baik.
+# Bisa juga lewat env MUSIC_FORMAT, atau menu "format" di dalam panel.
+#
+# Kontrol saat berjalan: spasi=pause  q=keluar  >/<=lagu berikut/sebelumnya
+#                        9/0=volume   kiri/kanan=maju-mundur 5 detik
+#
+# Catatan RAM (terukur di mesin ini, i3-1115G4 8GB):
+#   mpv --no-video file lokal   ~78 MB
+#   mpv --no-video stream YT   ~94-118 MB
+#   mpv mode GUI (pakai video) ~183 MB   <- inilah yang dihindari skrip ini
+
+set -uo pipefail
+
+MUSIC_DIR="${MUSIC_DIR:-$HOME/Music}"
+SEARCH_COUNT="${MUSIC_SEARCH_COUNT:-15}"
+# Format unduhan. mp3 = paling kompatibel tapi harus di-transcode dari opus
+# milik YouTube, jadi lambat dan berukuran besar. opus = format asli YouTube,
+# tidak di-transcode sama sekali: jauh lebih cepat dan sekitar 60% ukuran mp3
+# (terukur: mp3 ~223 kbps vs opus ~141 kbps). audacious dan mpv bisa keduanya.
+FORMAT="${MUSIC_FORMAT:-mp3}"
+VIDEO=0; RADIO=0; DOWNLOAD=0; PICK=0; MENU=0; PANEL=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -v) VIDEO=1; shift ;;
+        -r) RADIO=1; shift ;;
+        -d) DOWNLOAD=1; shift ;;
+        -s) PICK=1; shift ;;
+        -i) MENU=1; shift ;;
+        -p) PANEL=1; shift ;;
+        -o) FORMAT=opus; shift ;;
+        --mp3) FORMAT=mp3; shift ;;
+        *)  break ;;
+    esac
+done
+
+# Pencarian interaktif: yt-dlp untuk mengambil hasil, fzf untuk memilih.
+# Sengaja tidak memakai ytfzf — paketnya di repo ini rusak (direktori scraper
+# kosong, scraper bawaannya tidak menghasilkan apa pun). yt-dlp sudah terbukti
+# jalan, jadi lebih andal membangunnya sendiri daripada menambal paket orang.
+pick_video() {
+    local q="$1" list sel
+    command -v fzf >/dev/null || { echo "fzf tidak terpasang" >&2; return 1; }
+    echo "▶ mencari \"$q\" ..." >&2
+    # TAB harus karakter sungguhan: `yt-dlp --print` tidak menafsirkan \t,
+    # ia akan mencetaknya sebagai dua huruf literal.
+    local TAB
+    TAB=$(printf '\t')
+    list=$(yt-dlp --skip-download --no-warnings --flat-playlist \
+        --print "%(id)s${TAB}%(duration>%H:%M:%S)s${TAB}%(uploader).22s${TAB}%(title).70s" \
+        "ytsearch${SEARCH_COUNT}:$q" 2>/dev/null)
+    [ -n "$list" ] || { echo "tidak ada hasil" >&2; return 1; }
+    # Kolom id disembunyikan dari tampilan tapi tetap ikut agar bisa diambil.
+    sel=$(printf '%s\n' "$list" | fzf --with-nth=2.. --delimiter='\t' \
+        --prompt="pilih lagu > " --height=60% --reverse \
+        --header="Enter=pilih  Esc=batal") || return 1
+    printf '%s' "$sel" | cut -f1
+}
+
+# Suruh audacious memindai ulang ~/Music. Dijalankan setelah unduhan supaya
+# lagu baru langsung muncul tanpa perlu diklik manual. Dilewati diam-diam
+# kalau audacious tidak terpasang.
+refresh_audacious() {
+    command -v audacious >/dev/null || return 0
+    # `audacious -e` itu ENQUEUE: ia MENAMBAH ke playlist, bukan mengganti.
+    # Tanpa dibersihkan dulu, tiap refresh menumpuk duplikat, dan entri lama
+    # yang filenya sudah dihapus tertinggal sebagai "hantu" yang memicu
+    # error "No such file or directory" saat diputar.
+    # HANYA menyegarkan kalau audacious memang sedang terbuka. Sebelumnya
+    # unduhan ikut MENJALANKAN audacious — mengganggu saat mengunduh dari
+    # musicbox, karena pemutar lain tiba-tiba muncul tanpa diminta.
+    pgrep -x audacious >/dev/null 2>&1 || return 0
+    audtool playlist-clear >/dev/null 2>&1
+    audacious -e "$MUSIC_DIR" >/dev/null 2>&1
+    echo "  library audacious disegarkan"
+}
+
+# Unduh satu sumber ke ~/Music. Dipakai baik oleh flag -d maupun menu.
+do_download() {
+    local src="$1" fmt="${2:-$FORMAT}"
+    mkdir -p "$MUSIC_DIR"
+    echo "▶ mengunduh ke $MUSIC_DIR (format: $fmt)"
+    # --embed-* menanamkan judul/artis/sampul supaya audacious menampilkannya
+    # dengan benar. Ekstensi ikut format hasil konversi, jadi tidak ada lagi
+    # kasus file .mp3 yang isinya sebenarnya AAC.
+    local fmt_args
+    if [ "$fmt" = opus ]; then
+        # YouTube sudah menyajikan opus, jadi ini cuma remux — tanpa transcode.
+        fmt_args=(--audio-format opus)
+    else
+        fmt_args=(--audio-format mp3 --audio-quality 0)
+    fi
+    yt-dlp -x "${fmt_args[@]}" \
+           --embed-thumbnail --embed-metadata --no-playlist \
+           -o "$MUSIC_DIR/%(title)s.%(ext)s" "$src" || return 1
+    echo "✓ selesai"
+    refresh_audacious
+}
+
+# ---------- panel interaktif ----------
+menu_loop() {
+    command -v fzf >/dev/null || { echo "fzf tidak terpasang" >&2; exit 1; }
+    local choice q id n
+    while :; do
+        n=$(find "$MUSIC_DIR" -maxdepth 1 -type f \
+              \( -iname '*.mp3' -o -iname '*.m4a' -o -iname '*.opus' -o -iname '*.flac' -o -iname '*.ogg' -o -iname '*.wav' \) \
+              2>/dev/null | wc -l)
+        choice=$(printf '%s\n' \
+            "putar     koleksi lokal, acak  ($n lagu)" \
+            "cari      cari lalu putar dari YouTube" \
+            "simpan    cari lalu unduh ke ~/Music" \
+            "radio     autoplay mengikuti rekomendasi" \
+            "format    unduh sebagai: $FORMAT  (mp3 kompatibel / opus hemat)" \
+            "audacious buka pemutar koleksi" \
+            "segarkan  pindai ulang ~/Music di audacious" \
+            "keluar" \
+          | fzf --with-nth=1.. --prompt="music > " --height=40% --reverse \
+                --header="Enter=pilih  Esc=keluar" ) || return 0
+        case "${choice%% *}" in
+            putar)
+                [ "$n" -gt 0 ] || { echo "  ~/Music masih kosong"; continue; }
+                mpv "${opts[@]}" --shuffle --loop-playlist "$MUSIC_DIR" ;;
+            cari)
+                read -r -p "cari: " q; [ -n "$q" ] || continue
+                id=$(pick_video "$q") || continue
+                mpv "${opts[@]}" "https://www.youtube.com/watch?v=$id" ;;
+            simpan)
+                read -r -p "cari: " q; [ -n "$q" ] || continue
+                id=$(pick_video "$q") || continue
+                do_download "https://www.youtube.com/watch?v=$id" ;;
+            format)
+                # Toggle. Ditampilkan di menu supaya jelas mana yang aktif.
+                [ "$FORMAT" = mp3 ] && FORMAT=opus || FORMAT=mp3
+                echo "  format unduhan sekarang: $FORMAT" ;;
+            radio)
+                read -r -p "titik awal: " q; [ -n "$q" ] || continue
+                id=$(pick_video "$q") || continue
+                echo "▶ radio dimulai (mix rekomendasi)"
+                mpv "${opts[@]}" --loop-playlist=no \
+                    "https://www.youtube.com/watch?v=$id&list=RD$id" ;;
+            audacious)
+                command -v audacious >/dev/null \
+                    && { setsid audacious >/dev/null 2>&1 </dev/null & } \
+                    || echo "  audacious tidak terpasang" ;;
+            segarkan) refresh_audacious ;;
+            keluar)   return 0 ;;
+        esac
+    done
+}
+
+# ---------- panel: menu + visualizer dalam satu jendela ----------
+# tmux dipakai semata sebagai pembagi jendela; foot tidak bisa membelah diri.
+# cava warnanya sudah otomatis mengikuti skema Caelestia — `apply_cava()` di
+# theme.py menulis ~/.config/cava/config tiap skema berubah lalu mengirim
+# SIGUSR2 supaya cava memuat ulang tanpa perlu dijalankan ulang.
+panel() {
+    for c in tmux cava; do
+        command -v "$c" >/dev/null || { echo "$c belum terpasang: sudo pacman -S $c" >&2; exit 1; }
+    done
+    local S=music
+    # Kalau panel sudah pernah dibuka, sambung lagi alih-alih membuat sesi baru.
+    tmux has-session -t "$S" 2>/dev/null && exec tmux attach -t "$S"
+
+    tmux new-session -d -s "$S" -n music "$0 -i"
+    # -l 9: visualizer setinggi 9 baris di bawah, sisanya untuk menu.
+    tmux split-window -v -l 9 -t "$S" "cava"
+    tmux select-pane -t "${S}.0"
+    # Tampilan minimalis: tanpa status bar, tanpa garis pemisah mencolok.
+    tmux set-option -t "$S" status off
+    tmux set-option -t "$S" mouse on
+    tmux set-option -t "$S" pane-border-style "fg=colour238"
+    tmux set-option -t "$S" pane-active-border-style "fg=colour238"
+    exec tmux attach -t "$S"
+}
+
+[ "$PANEL" -eq 1 ] && panel
+
+# --no-video adalah penghematan terbesar: ~105 MB dibanding mode GUI.
+opts=(--volume=50 --term-osd-bar)
+[ "$VIDEO" -eq 0 ] && opts+=(--no-video)
+
+# bestaudio dulu, lalu fallback ke best. Fallback ini WAJIB untuk live stream:
+# siaran langsung YouTube hanya menyediakan m3u8 gabungan video+audio, tidak
+# punya format "audio only", jadi bestaudio saja akan gagal.
+opts+=(--ytdl-format="bestaudio/best")
+
+[ "$MENU" -eq 1 ] && { menu_loop; exit 0; }
+
+# ---------- unduh ----------
+if [ "$DOWNLOAD" -eq 1 ]; then
+    [ $# -gt 0 ] || { echo "perlu judul atau url untuk diunduh" >&2; exit 1; }
+    arg="$*"
+    if [ "$PICK" -eq 1 ]; then
+        id=$(pick_video "$arg") || exit 1
+        src="https://www.youtube.com/watch?v=$id"
+    else
+        case "$arg" in http://*|https://*) src="$arg" ;; *) src="ytsearch1:$arg" ;; esac
+    fi
+    do_download "$src" || exit 1
+    exit 0
+fi
+
+# ---------- radio (autoplay mengikuti rekomendasi) ----------
+if [ "$RADIO" -eq 1 ]; then
+    [ $# -gt 0 ] || { echo "perlu judul atau url untuk dijadikan titik awal" >&2; exit 1; }
+    arg="$*"
+    if [ "$PICK" -eq 1 ]; then
+        id=$(pick_video "$arg") || exit 1
+    else
+        case "$arg" in
+            http*) id=$(printf '%s' "$arg" | grep -oE '[A-Za-z0-9_-]{11}' | head -1) ;;
+            *)     echo "▶ mencari titik awal: $arg"
+                   id=$(yt-dlp --skip-download --no-warnings --print "%(id)s" "ytsearch1:$arg" 2>/dev/null | head -1) ;;
+        esac
+    fi
+    [ -n "${id:-}" ] || { echo "tidak ketemu" >&2; exit 1; }
+    # Playlist ber-awalan RD adalah "Mix" YouTube: daftar rekomendasi berantai
+    # yang terus menyambung sendiri. Inilah autoplay berbasis algoritma.
+    echo "▶ radio dimulai (mix rekomendasi, ratusan lagu)"
+    exec mpv "${opts[@]}" --loop-playlist=no \
+        "https://www.youtube.com/watch?v=$id&list=RD$id"
+fi
+
+# ---------- putar ----------
+if [ $# -eq 0 ]; then
+    [ -d "$MUSIC_DIR" ] || { echo "Direktori musik tidak ada: $MUSIC_DIR" >&2; exit 1; }
+    echo "▶ memutar $MUSIC_DIR (acak)"
+    exec mpv "${opts[@]}" --shuffle --loop-playlist "$MUSIC_DIR"
+fi
+
+arg="$*"
+[ -e "$arg" ] && exec mpv "${opts[@]}" "$arg"
+case "$arg" in
+    http://*|https://*) echo "▶ $arg"; exec mpv "${opts[@]}" "$arg" ;;
+esac
+if [ "$PICK" -eq 1 ]; then
+    id=$(pick_video "$arg") || exit 1
+    exec mpv "${opts[@]}" "https://www.youtube.com/watch?v=$id"
+fi
+echo "▶ mencari: $arg"
+exec mpv "${opts[@]}" "ytdl://ytsearch:$arg"
