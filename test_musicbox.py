@@ -89,6 +89,30 @@ async def main():
         check("lagu masuk album", len(app.playlists.get("uji", [])) > 0,
               f"{len(app.playlists.get('uji', []))} lagu")
 
+        # Keluarkan lagu dari album lewat node daun di tree.
+        app.query_one("#tabs").active = "tab-pl"
+        await pilot.pause(0.4)
+        from textual.widgets import Tree as T
+        tree = app.query_one("#pltree", T)
+        leaf = None
+        for node in tree.root.children:
+            for child in node.children:
+                leaf = child; break
+        if leaf is not None:
+            # move_cursor() yang memindahkan cursor_node; select_node() dan
+            # menyetel cursor_line tidak melakukannya.
+            tree.move_cursor(leaf)
+            await pilot.pause(0.2)
+            check("kursor tree pindah ke daun",
+                  (tree.cursor_node.data or {}).get("item") is not None)
+            before = len(app.playlists.get("uji", []))
+            app.action_remove_from_album()
+            await pilot.pause(0.4)
+            after = len(app.playlists.get("uji", []))
+            check("keluarkan dari album", after < before, f"{before} -> {after}")
+        else:
+            check("keluarkan dari album", False, "daun tidak ketemu")
+
         # check_action harus menyembunyikan aksi yang tidak relevan per tab.
         app.query_one("#tabs").active = "tab-dl"
         await pilot.pause(0.2)
@@ -96,7 +120,8 @@ async def main():
 
         # Panel aksi lagu harus ikut berganti per tab.
         from textual.containers import Vertical as V
-        for tab, expect in (("tab-lib", 4), ("tab-yt", 5), ("tab-queue", 3), ("tab-dl", 0)):
+        for tab, expect in (("tab-lib", 4), ("tab-yt", 5), ("tab-queue", 3),
+                            ("tab-pl", 3), ("tab-dl", 0)):
             app.query_one("#tabs").active = tab
             await pilot.pause(0.3)
             n = len(app.query_one("#song-actions", V).children)

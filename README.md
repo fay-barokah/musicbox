@@ -90,7 +90,7 @@ python3 test_musicbox.py
 ```
 
 Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 60 hal: semua handler keybind ada dan tidak melempar exception,
+Memeriksa 63 hal: semua handler keybind ada dan tidak melempar exception,
 perpindahan tab, antrean, album, panel aksi kontekstual, dan ekstraksi sampul.
 
 ## Catatan teknis

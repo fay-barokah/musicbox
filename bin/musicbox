@@ -1084,7 +1084,8 @@ class MusicBox(App):
     # Peta tab -> tabel isinya, dipakai agar panel info hanya mengikuti tab
     # yang sedang dibuka.
     TAB_TABLE = {"tab-lib": "library", "tab-yt": "results",
-                 "tab-queue": "queue", "tab-dl": "downloads"}
+                 "tab-queue": "queue", "tab-dl": "downloads",
+                 "tab-pl": "album"}
 
     # Aksi yang hanya masuk akal di tab tertentu. Selain yang terdaftar di
     # sini, aksi dianggap global (kendali pemutaran, keluar, dan sejenisnya).
@@ -1129,8 +1130,43 @@ class MusicBox(App):
             return
         self.update_info(event.data_table.id, event.cursor_row)
 
+    def on_tree_node_highlighted(self, event) -> None:
+        self.rebuild_song_actions("album")
+        self.update_album_info(event.node)
+
+    def update_album_info(self, node) -> None:
+        info = self.query_one("#info-text", Static)
+        data = getattr(node, "data", None) or {}
+        name = data.get("playlist")
+        if not name:
+            info.update("[dim]pilih album atau lagu di dalamnya[/dim]")
+            self.show_cover(None)
+            return
+        if "item" in data:
+            it = data["item"]
+            target = it.get("target", "")
+            self.show_cover(extract_cover(Path(target)) if not target.startswith("http") else None)
+            info.update("\n".join([
+                f"[b]{it.get('title', '?')}[/b]", "",
+                f"album    {name}",
+                f"sumber   {it.get('source', '?')}",
+                "", f"[dim]{target}[/dim]",
+            ]))
+        else:
+            items = self.playlists.get(name, [])
+            self.show_cover(None)
+            info.update("\n".join([
+                f"[b]{name}[/b]", "",
+                f"lagu     {len(items)}",
+                "", "[dim]enter putar semua[/dim]",
+            ]))
+
     def on_tabbed_content_tab_activated(self, event) -> None:
         table_id = self._active_table()
+        if table_id == "album":
+            self.rebuild_song_actions("album")
+            self.update_album_info(self.query_one("#pltree", Tree).cursor_node)
+            return
         if not table_id:
             return
         try:
@@ -1181,6 +1217,12 @@ class MusicBox(App):
                       ("⬇  unduh", "download")],
         "queue":     [("▶  putar antrean", "play_queue"), ("♪  album", "add_to_playlist"),
                       ("✕  keluarkan", "dequeue")],
+        # Tab Album memakai Tree, bukan DataTable. Tanpa entri sendiri di sini
+        # panel kanan membeku menampilkan aksi tab sebelumnya, dan aksi
+        # "keluarkan dari album" tidak pernah muncul sama sekali.
+        "album":     [("▶  putar", "play_selected"),
+                      ("✕  keluarkan dari album", "remove_from_album"),
+                      ("🗑  hapus album", "delete_playlist")],
         "downloads": [],
     }
 
@@ -1353,6 +1395,9 @@ class MusicBox(App):
             for it in items:
                 node.add_leaf(it.get("title", "?"),
                               data={"playlist": name, "item": it})
+            # Dibentangkan sejak awal: album yang terlipat menyembunyikan isinya
+            # sehingga lagunya tidak bisa disorot maupun dikeluarkan.
+            node.expand()
 
     def action_new_playlist(self) -> None:
         """Buat playlist baru yang kosong.
@@ -1406,6 +1451,12 @@ class MusicBox(App):
             idx = self.query_one("#queue", DataTable).cursor_row
             if 0 <= idx < len(self.queue):
                 return dict(self.queue[idx])
+        elif active == "album":
+            # Sumbernya Tree, jadi lagu diambil dari node yang disorot.
+            node = self.query_one("#pltree", Tree).cursor_node
+            data = getattr(node, "data", None) or {}
+            if "item" in data:
+                return dict(data["item"])
         return None
 
     def action_add_to_playlist(self) -> None:
