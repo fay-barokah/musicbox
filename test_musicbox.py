@@ -89,6 +89,17 @@ async def main():
         check("lagu masuk album", len(app.playlists.get("uji", [])) > 0,
               f"{len(app.playlists.get('uji', []))} lagu")
 
+        # Duplikat harus ditolak.
+        before_dup = len(app.playlists.get("uji", []))
+        app._append_to_album("uji", app._pending_add)
+        await pilot.pause(0.3)
+        check("duplikat ditolak", len(app.playlists.get("uji", [])) == before_dup,
+              f"{before_dup} tetap {len(app.playlists.get('uji', []))}")
+
+        # Enter pada album tidak boleh ikut melipatnya.
+        from textual.widgets import Tree as T0
+        check("auto_expand mati", app.query_one("#pltree", T0).auto_expand is False)
+
         # Keluarkan lagu dari album lewat node daun di tree.
         app.query_one("#tabs").active = "tab-pl"
         await pilot.pause(0.4)

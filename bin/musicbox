@@ -202,6 +202,10 @@ class MpvPlayer:
     async def seek(self, delta: int) -> None:
         await self._send({"command": ["seek", delta, "relative"]})
 
+    async def set_loop(self, enabled: bool) -> None:
+        await self._send({"command": ["set_property", "loop-playlist",
+                                      "inf" if enabled else "no"]})
+
     async def seek_fraction(self, frac: float) -> None:
         """Lompat ke posisi 0..1 dari durasi. Dipakai saat bar diklik."""
         await self._send({"command": ["seek", max(0.0, min(1.0, frac)) * 100,
@@ -962,7 +966,7 @@ class MusicBox(App):
                         yield DataTable(id="queue", cursor_type="row",
                                         zebra_stripes=False)
                     with TabPane("Album", id="tab-pl"):
-                        yield Tree("album", id="pltree")
+                        yield Tree("album", id="pltree")  # auto_expand dimatikan di on_mount
                     with TabPane("Unduhan", id="tab-dl"):
                         yield DataTable(id="downloads", cursor_type="row",
                                         zebra_stripes=False)
@@ -983,6 +987,9 @@ class MusicBox(App):
         self.query_one("#results", DataTable).add_columns("Judul", "Kanal", "Durasi")
         self.query_one("#downloads", DataTable).add_columns("Judul", "Format", "Status", "Waktu")
         self.query_one("#queue", DataTable).add_columns("#", "Judul", "Sumber")
+        # Enter pada node album jangan ikut melipatnya: album yang menutup
+        # membuat pemutaran terlihat seperti tidak terjadi apa-apa.
+        self.query_one("#pltree", Tree).auto_expand = False
         self.load_downloads()
         self.load_queue()
         self.load_playlists()
@@ -1359,15 +1366,17 @@ class MusicBox(App):
     def action_queue_down(self) -> None:
         self._move_in_queue(1)
 
-    async def action_play_queue(self) -> None:
+    async def action_play_queue(self, loop: bool = False) -> None:
         """Putar antrean dari awal, sisanya diantrekan ke playlist mpv."""
         if not self.queue:
             self.notify("antrean kosong", timeout=2)
             return
+        await self.player.set_loop(loop)
         await self.player.play(self.queue[0]["target"])
         for q in self.queue[1:]:
             await self.player.append(q["target"])
-        self.notify(f"memutar antrean ({len(self.queue)})", timeout=2)
+        self.notify(f"memutar {len(self.queue)} lagu" + (" · diulang" if loop else ""),
+                    timeout=2)
 
     # -- playlist tersimpan ------------------------------------------------
 
@@ -1486,6 +1495,12 @@ class MusicBox(App):
         if not item:
             return
         items = list(self.playlists.get(name, []))
+        # Tolak duplikat: satu lagu cukup sekali dalam satu album. Tanpa ini
+        # menekan tambah dua kali menghasilkan entri kembar yang membingungkan
+        # saat diputar maupun dikeluarkan.
+        if any(i.get("target") == item.get("target") for i in items):
+            self.notify(f"sudah ada di '{name}'", severity="warning", timeout=3)
+            return
         items.append(item)
         try:
             (PLAYLIST_DIR / f"{name}.json").write_text(json.dumps(items, indent=1))
@@ -1544,7 +1559,9 @@ class MusicBox(App):
             self.queue = list(self.playlists.get(data["playlist"], []))
             self.save_queue()
             self.refresh_queue_table()
-            await self.action_play_queue()
+            # Album diulang terus. Album biasanya pendek; berhenti senyap
+            # setelah lagu terakhir terasa seperti pemutarnya mati.
+            await self.action_play_queue(loop=True)
 
     # -- riwayat unduhan ---------------------------------------------------
 
@@ -1568,6 +1585,9 @@ class MusicBox(App):
         except OSError:
             pass
         self.query_one("#queue", DataTable).add_columns("#", "Judul", "Sumber")
+        # Enter pada node album jangan ikut melipatnya: album yang menutup
+        # membuat pemutaran terlihat seperti tidak terjadi apa-apa.
+        self.query_one("#pltree", Tree).auto_expand = False
         self.load_downloads()
         self.load_queue()
         self.load_playlists()
