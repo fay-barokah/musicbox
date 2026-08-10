@@ -24,8 +24,10 @@ import asyncio
 import json
 import os
 import random
+import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -137,9 +139,24 @@ class MpvPlayer:
                 # Fallback ke `best` wajib: live stream YouTube tidak punya
                 # format audio-only, jadi `bestaudio` sendirian akan gagal.
                 "--ytdl-format=bestaudio/best"]
+        # Keluaran audio bisa dipaksa lewat MUSICBOX_AO. Dipakai pengujian
+        # (`MUSICBOX_AO=null`) supaya tidak berebut perangkat dengan musicbox
+        # yang sedang benar-benar dipakai mendengarkan musik — kalau berebut,
+        # mpv gagal membuka stream dan lagunya tidak jadi diputar sama sekali.
+        ao = os.environ.get("MUSICBOX_AO")
+        if ao:
+            args.append(f"--ao={ao}")
         script = self._mpris_script()
         if script:
             args.append(f"--script={script}")
+        else:
+            # Menahan diri dari `--script=` saja tidak cukup. Paket mpv-mpris di
+            # Arch/CachyOS memasang symlink di /etc/mpv/scripts/mpris.so, dan mpv
+            # memuat isi direktori itu untuk setiap pemakaian tanpa diminta —
+            # jadi plugin yang sama tetap ikut dan tetap bisa membunuh mpv.
+            # `--load-scripts=no` yang benar-benar mematikannya. Terverifikasi:
+            # tanpa flag ini org.mpris.MediaPlayer2.mpv tetap muncul di bus.
+            args.append("--load-scripts=no")
         self.mpris = bool(script)
         self.proc = subprocess.Popen(
             args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -325,6 +342,322 @@ class MpvPlayer:
         MPV_SOCKET.unlink(missing_ok=True)
 
 
+# -------------------------------------------------------------------- mpris
+
+
+MPRIS_BUS = "org.mpris.MediaPlayer2.musicbox"
+MPRIS_PATH = "/org/mpris/MediaPlayer2"
+MPRIS_IFACE = "org.mpris.MediaPlayer2"
+PLAYER_IFACE = "org.mpris.MediaPlayer2.Player"
+PROPS_IFACE = "org.freedesktop.DBus.Properties"
+
+
+def dbus_safe(text) -> str:
+    """Bersihkan teks sebelum diserahkan ke D-Bus.
+
+    Persis di sinilah mpv-mpris jatuh: GLib memanggil abort() begitu menerima
+    string yang bukan UTF-8 sah, dan yang mati bukan cuma pengirimnya melainkan
+    seluruh proses. Satu huruf yang berubah jadi tanda tanya jauh lebih murah
+    daripada pemutar yang berhenti di tengah album.
+    """
+    return str(text or "").encode("utf-8", "replace").decode("utf-8", "replace")
+
+
+class MprisService:
+    """Daftarkan musicbox sendiri ke D-Bus sebagai pemutar MPRIS.
+
+    Dengan ini musicbox muncul di widget media desktop — termasuk milik
+    Caelestia — lengkap dengan judul, sampul, dan tombol, tanpa menumpang
+    plugin mpv-mpris yang di sistem ini membunuh mpv saat lagu berpindah.
+
+    Semua urusan D-Bus berjalan di thread sendiri dengan main loop GLib.
+    Perubahan status ditengok berkala dari thread itu, bukan dikirim dari
+    thread asyncio, karena memancarkan sinyal D-Bus lintas thread tidak aman.
+    Perintah dari luar berjalan sebaliknya: dijadwalkan kembali ke loop
+    asyncio, satu-satunya tempat yang boleh menyentuh socket mpv.
+
+    Kalau python-dbus tidak ada, kelas ini diam sepenuhnya dan musicbox tetap
+    berjalan seperti biasa — hanya tanpa ikon di desktop.
+    """
+
+    def __init__(self, player: "MpvPlayer", info_hook=None) -> None:
+        self.player = player
+        self.info_hook = info_hook or (lambda: {})
+        self.aktif = False
+        self._loop = None            # main loop GLib
+        self._thread = None
+        self._obj = None
+        self._terakhir: dict = {}
+        self._asyncio_loop = None
+
+    # -- daur hidup --------------------------------------------------------
+
+    def start(self) -> bool:
+        try:
+            self._asyncio_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._asyncio_loop = None
+        try:
+            import dbus                       # noqa: F401
+            import dbus.service               # noqa: F401
+            from dbus.mainloop.glib import DBusGMainLoop  # noqa: F401
+            from gi.repository import GLib    # noqa: F401
+        except Exception:
+            return False                      # tanpa pustaka D-Bus, diam saja
+        self._thread = threading.Thread(target=self._serve, name="mpris",
+                                        daemon=True)
+        self._thread.start()
+        return True
+
+    def stop(self) -> None:
+        if self._loop is not None:
+            try:
+                self._loop.quit()
+            except Exception:
+                pass
+        self.aktif = False
+
+    def _serve(self) -> None:
+        import dbus
+        from dbus.mainloop.glib import DBusGMainLoop
+        from gi.repository import GLib
+        try:
+            DBusGMainLoop(set_as_default=True)
+            bus = dbus.SessionBus()
+            nama = dbus.service.BusName(MPRIS_BUS, bus)
+            self._obj = _MprisObject(bus, self, nama)
+            self.aktif = True
+            # Setengah detik cukup halus untuk widget desktop dan tidak
+            # membebani: yang dikirim hanya properti yang benar-benar berubah.
+            GLib.timeout_add(500, self._tengok)
+            self._loop = GLib.MainLoop()
+            self._loop.run()
+        except Exception:
+            self.aktif = False
+
+    # -- properti ----------------------------------------------------------
+
+    def _status(self) -> str:
+        st = self.player.state
+        if not st.get("path"):
+            return "Stopped"
+        return "Paused" if st.get("pause") else "Playing"
+
+    def metadata(self) -> dict:
+        import dbus
+        st = self.player.state
+        info = {}
+        try:
+            info = self.info_hook() or {}
+        except Exception:
+            info = {}
+        judul = info.get("title") or st.get("title") or "musicbox"
+        artis = info.get("artist") or ""
+        durasi = float(st.get("duration") or 0.0)
+        md = {
+            "mpris:trackid": dbus.ObjectPath("/org/mpris/MediaPlayer2/musicbox/lagu"),
+            "mpris:length": dbus.Int64(int(durasi * 1_000_000)),
+            "xesam:title": dbus.String(dbus_safe(judul)),
+            "xesam:artist": dbus.Array([dbus.String(dbus_safe(artis or "—"))],
+                                       signature="s"),
+            "xesam:album": dbus.String(dbus_safe(info.get("album") or "")),
+        }
+        sampul = info.get("art")
+        if sampul:
+            md["mpris:artUrl"] = dbus.String(
+                Path(sampul).as_uri() if not str(sampul).startswith(("http", "file"))
+                else dbus_safe(sampul))
+        sumber = st.get("path")
+        if sumber:
+            md["xesam:url"] = dbus.String(
+                dbus_safe(sumber) if str(sumber).startswith("http")
+                else Path(str(sumber)).as_uri())
+        return md
+
+    def props(self, iface: str) -> dict:
+        import dbus
+        if iface == MPRIS_IFACE:
+            return {
+                "CanQuit": dbus.Boolean(False),
+                "CanRaise": dbus.Boolean(False),
+                "HasTrackList": dbus.Boolean(False),
+                "Identity": dbus.String("musicbox"),
+                "DesktopEntry": dbus.String("musicbox"),
+                "SupportedUriSchemes": dbus.Array(["file", "http", "https"],
+                                                  signature="s"),
+                "SupportedMimeTypes": dbus.Array(["audio/mpeg", "audio/ogg",
+                                                  "audio/flac", "audio/mp4"],
+                                                 signature="s"),
+            }
+        if iface == PLAYER_IFACE:
+            st = self.player.state
+            return {
+                "PlaybackStatus": dbus.String(self._status()),
+                "LoopStatus": dbus.String("Playlist" if self.player.loop else "None"),
+                "Rate": dbus.Double(1.0),
+                "Shuffle": dbus.Boolean(False),
+                "Metadata": dbus.Dictionary(self.metadata(), signature="sv"),
+                "Volume": dbus.Double(float(st.get("volume") or 70.0) / 100.0),
+                "Position": dbus.Int64(int(float(st.get("time-pos") or 0.0)
+                                           * 1_000_000)),
+                "MinimumRate": dbus.Double(1.0),
+                "MaximumRate": dbus.Double(1.0),
+                "CanGoNext": dbus.Boolean(True),
+                "CanGoPrevious": dbus.Boolean(True),
+                "CanPlay": dbus.Boolean(True),
+                "CanPause": dbus.Boolean(True),
+                "CanSeek": dbus.Boolean(True),
+                "CanControl": dbus.Boolean(True),
+            }
+        return {}
+
+    def _tengok(self) -> bool:
+        """Bandingkan dengan keadaan terakhir, kirim hanya yang berubah."""
+        import dbus
+        try:
+            sekarang = {
+                "PlaybackStatus": self._status(),
+                "Volume": round(float(self.player.state.get("volume") or 70.0) / 100.0, 3),
+                "_judul": str(self.metadata().get("xesam:title", "")),
+                "_durasi": int(self.metadata().get("mpris:length", 0)),
+            }
+        except Exception:
+            return True
+        berubah = {k: v for k, v in sekarang.items() if self._terakhir.get(k) != v}
+        if berubah:
+            kirim = {}
+            if "PlaybackStatus" in berubah:
+                kirim["PlaybackStatus"] = dbus.String(sekarang["PlaybackStatus"])
+            if "Volume" in berubah:
+                kirim["Volume"] = dbus.Double(sekarang["Volume"])
+            if "_judul" in berubah or "_durasi" in berubah:
+                kirim["Metadata"] = dbus.Dictionary(self.metadata(), signature="sv")
+            try:
+                self._obj.PropertiesChanged(PLAYER_IFACE,
+                                            dbus.Dictionary(kirim, signature="sv"),
+                                            dbus.Array([], signature="s"))
+            except Exception:
+                pass
+            self._terakhir = sekarang
+        return True                            # terus dijadwalkan ulang
+
+    # -- perintah dari luar -------------------------------------------------
+
+    def command(self, nama: str, *args) -> None:
+        """Jalankan perintah di loop asyncio; socket mpv hanya milik loop itu."""
+        if self._asyncio_loop is None:
+            return
+        peta = {
+            "next": lambda: self.player.next_track(),
+            "prev": lambda: self.player.prev_track(),
+            "playpause": lambda: self.player.toggle_pause(),
+            "stop": lambda: self.player.stop(),
+            "seek": lambda: self.player.seek(int(args[0]) if args else 0),
+            "volume": lambda: self.player.set_volume_abs(float(args[0]) * 100.0),
+        }
+        buat = peta.get(nama)
+        if not buat:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(buat(), self._asyncio_loop)
+        except Exception:
+            pass
+
+    def play_state(self, mau_main: bool) -> None:
+        st = self.player.state
+        if bool(st.get("pause")) == (not mau_main):
+            return
+        self.command("playpause")
+
+
+def _bikin_mpris_object():
+    """Definisi objek D-Bus dibuat saat dibutuhkan.
+
+    Kelasnya mewarisi dbus.service.Object, jadi tidak bisa didefinisikan di
+    level modul: musicbox harus tetap bisa dijalankan di sistem tanpa
+    python-dbus, dan impor di level modul akan menggagalkannya sejak awal.
+    """
+    import dbus
+    import dbus.service
+
+    class _Obj(dbus.service.Object):
+        def __init__(self, bus, svc, nama):
+            super().__init__(nama, MPRIS_PATH)
+            self.svc = svc
+
+        @dbus.service.method(MPRIS_IFACE)
+        def Raise(self):
+            pass
+
+        @dbus.service.method(MPRIS_IFACE)
+        def Quit(self):
+            pass
+
+        @dbus.service.method(PLAYER_IFACE)
+        def Next(self):
+            self.svc.command("next")
+
+        @dbus.service.method(PLAYER_IFACE)
+        def Previous(self):
+            self.svc.command("prev")
+
+        @dbus.service.method(PLAYER_IFACE)
+        def Pause(self):
+            self.svc.play_state(False)
+
+        @dbus.service.method(PLAYER_IFACE)
+        def Play(self):
+            self.svc.play_state(True)
+
+        @dbus.service.method(PLAYER_IFACE)
+        def PlayPause(self):
+            self.svc.command("playpause")
+
+        @dbus.service.method(PLAYER_IFACE)
+        def Stop(self):
+            self.svc.command("stop")
+
+        @dbus.service.method(PLAYER_IFACE, in_signature="x")
+        def Seek(self, offset):
+            self.svc.command("seek", int(offset) // 1_000_000)
+
+        @dbus.service.method(PLAYER_IFACE, in_signature="ox")
+        def SetPosition(self, trackid, pos):
+            st = self.svc.player.state
+            sekarang = float(st.get("time-pos") or 0.0)
+            self.svc.command("seek", int(int(pos) / 1_000_000 - sekarang))
+
+        @dbus.service.method(PLAYER_IFACE, in_signature="s")
+        def OpenUri(self, uri):
+            pass
+
+        @dbus.service.method(PROPS_IFACE, in_signature="ss", out_signature="v")
+        def Get(self, iface, prop):
+            return self.svc.props(iface).get(prop, "")
+
+        @dbus.service.method(PROPS_IFACE, in_signature="s", out_signature="a{sv}")
+        def GetAll(self, iface):
+            return self.svc.props(iface)
+
+        @dbus.service.method(PROPS_IFACE, in_signature="ssv")
+        def Set(self, iface, prop, value):
+            if iface == PLAYER_IFACE and prop == "Volume":
+                self.svc.command("volume", float(value))
+
+        @dbus.service.signal(PROPS_IFACE, signature="sa{sv}as")
+        def PropertiesChanged(self, iface, changed, invalidated):
+            pass
+
+    return _Obj
+
+
+class _MprisObject:
+    """Pembungkus tipis supaya kelas D-Bus baru dibuat saat pustakanya ada."""
+
+    def __new__(cls, bus, svc, nama):
+        return _bikin_mpris_object()(bus, svc, nama)
+
+
 # ------------------------------------------------------------------ library
 
 
@@ -482,6 +815,34 @@ def yt_search(query: str, limit: int = 20) -> list[dict]:
             results.append({"id": parts[0], "duration": parts[1],
                             "uploader": parts[2], "title": parts[3]})
     return results
+
+
+# Baris progres yt-dlp dengan --newline, misalnya:
+#   [download]  45.2% of    3.85MiB at    1.20MiB/s ETA 00:02
+# Ukuran kadang berawalan "~" (perkiraan), kecepatan dan ETA bisa "Unknown"
+# atau belum ada sama sekali di pembaruan pertama.
+DL_PROGRESS = re.compile(
+    r"\[download\]\s+([\d.]+)%\s+of\s+~?\s*(\S+)"
+    r"(?:\s+at\s+(\S+))?(?:\s+ETA\s+(\S+))?")
+
+
+def progress_cell(entry: dict, width: int = 20) -> str:
+    """Sel progres bergaya pacman: bar, persen, ukuran, kecepatan, sisa waktu.
+
+    Unduhan yang sudah selesai cukup menampilkan statusnya — bar penuh yang
+    tertinggal di layar hanya menyita lebar tanpa memberi tahu apa pun.
+    """
+    if entry.get("status") != "berjalan":
+        return str(entry.get("status", "?"))
+    pct = float(entry.get("percent") or 0.0)
+    penuh = int(width * min(pct, 100.0) / 100.0)
+    bar = "#" * penuh + "-" * (width - penuh)
+    bagian = [f"[{bar}] {pct:5.1f}%"]
+    for kunci, awalan in (("size", ""), ("speed", ""), ("eta", "ETA ")):
+        nilai = entry.get(kunci)
+        if nilai and nilai != "Unknown":
+            bagian.append(f"{awalan}{nilai}")
+    return "  ".join(bagian)
 
 
 def yt_url(video_id: str) -> str:
@@ -867,13 +1228,30 @@ class MusicBox(App):
         border: round $cae-outline;
         padding: 1 2;
         color: $cae-on-variant;
+        overflow-y: auto;
+        scrollbar-background: transparent;
+        scrollbar-color: $cae-primary;
+        scrollbar-size-vertical: 1;
     }
     /* Tinggi sampul dipatok supaya teks di bawahnya tidak melompat-lompat
        saat berpindah antar lagu dengan rasio gambar berbeda. */
     #cover { height: 14; width: 1fr; background: transparent; }
     #cover Image { width: 1fr; height: 14; }
+    /* Sampul mengecil saat panel pendek — misalnya ketika visualizer menyala.
+       Yang harus mengalah adalah gambarnya, bukan tombol aksinya. */
+    #info.sempit #cover { height: 8; }
+    #info.sempit #cover Image { height: 8; }
     #info-text { height: auto; background: transparent; }
-    #song-actions { height: auto; background: transparent; margin-top: 1; }
+    /* Dipaku ke dasar panel. Sebelumnya tombol ini ikut terdorong keluar
+       begitu ruang menyempit, dan aksi per-lagu jadi tak terjangkau sama
+       sekali — yang paling mengganggu karena tidak ada tanda apa pun bahwa
+       tombolnya masih ada di bawah sana. */
+    #song-actions {
+        dock: bottom;
+        height: auto;
+        background: transparent;
+        margin-top: 1;
+    }
     .song-act {
         width: 1fr;
         height: 1;
@@ -906,6 +1284,9 @@ class MusicBox(App):
         scrollbar-background: transparent;
         scrollbar-color: $cae-primary;
         scrollbar-size-vertical: 1;
+        /* Judul unduhan bisa jauh lebih lebar daripada panel. Dibiarkan
+           meluber lalu digeser mendatar, bukan dipotong diam-diam. */
+        scrollbar-size-horizontal: 1;
     }
     DataTable > .datatable--header {
         background: transparent;
@@ -1004,6 +1385,9 @@ class MusicBox(App):
         self.library = Library()
         self.autoplay = True
         self.cava_on = True
+        self._dl_terakhir: set[int] = set()
+        self._np_cache: dict = {}
+        self.mpris: MprisService | None = None
         self.results: list[dict] = []
         self.dl_format = "mp3"
         self._pending_delete: str | None = None
@@ -1086,7 +1470,8 @@ class MusicBox(App):
         table = self.query_one("#library", DataTable)
         table.add_columns("Judul", "Artis", "Durasi")
         self.query_one("#results", DataTable).add_columns("Judul", "Kanal", "Durasi")
-        self.query_one("#downloads", DataTable).add_columns("Judul", "Format", "Status", "Waktu")
+        self.query_one("#downloads", DataTable).add_columns(
+            "Judul", "Format", "Progres", "Waktu")
         self.query_one("#queue", DataTable).add_columns("#", "Judul", "Sumber")
         # Enter pada node album jangan ikut melipatnya: album yang menutup
         # membuat pemutaran terlihat seperti tidak terjadi apa-apa.
@@ -1099,11 +1484,22 @@ class MusicBox(App):
         await self.player.start()
         self.player.on_update = self._schedule_refresh
 
+        # musicbox mendaftar sendiri ke D-Bus. Plugin mpv-mpris sengaja tidak
+        # dipakai (lihat MpvPlayer._mpris_script) — ikon di widget media desktop
+        # tetap ada, tanpa proses pemutar yang bisa ikut mati bersamanya.
+        # Kalau plugin lama sengaja dinyalakan lewat MUSICBOX_MPRIS=1, layanan
+        # ini mengalah: dua pendaftar sekaligus hanya menghasilkan dua pemutar
+        # kembar di widget desktop.
+        if not self.player.mpris:
+            self.mpris = MprisService(self.player, self.now_playing_info)
+            self.mpris.start()
+
         await self.restore_resume()
 
         self.set_interval(0.5, self.refresh_now_playing)
         self.set_interval(2.0, self._watch_scheme)
         self.set_interval(1.0, self._watch_player)
+        self.set_interval(0.5, self._tick_downloads)
         try:
             self._scheme_mtime = SCHEME_FILE.stat().st_mtime
         except OSError:
@@ -1112,6 +1508,46 @@ class MusicBox(App):
     def _schedule_refresh(self) -> None:
         # Dipanggil dari task pembaca IPC; jadwalkan di loop UI.
         self.call_later(self.refresh_now_playing)
+
+    def now_playing_info(self) -> dict:
+        """Keterangan lagu yang sedang berbunyi, untuk widget media desktop.
+
+        Hasilnya disimpan per lagu. Pengintai MPRIS memanggil ini dua kali tiap
+        detik, dan mengekstrak sampul sesering itu berarti membaca ulang berkas
+        audio terus-menerus tanpa alasan.
+        """
+        st = self.player.state
+        path = st.get("path")
+        if not path:
+            return {}
+        if self._np_cache.get("path") == path:
+            return self._np_cache["info"]
+        info: dict = {"title": st.get("title") or Path(str(path)).stem}
+        try:
+            if str(path).startswith("http"):
+                vid = ""
+                for bagian in str(path).split("?", 1)[-1].split("&"):
+                    if bagian.startswith("v="):
+                        vid = bagian[2:]
+                        break
+                if vid:
+                    gambar = fetch_thumbnail(vid)
+                    if gambar:
+                        info["art"] = str(gambar)
+            else:
+                p = Path(str(path))
+                lagu = next((x for x in self.library.tracks
+                             if x["path"] == str(p)), None)
+                if lagu:
+                    info["title"] = lagu["title"] or info["title"]
+                    info["artist"] = lagu.get("artist") or ""
+                sampul = extract_cover(p)
+                if sampul:
+                    info["art"] = str(sampul)
+        except Exception:
+            pass
+        self._np_cache = {"path": path, "info": info}
+        return info
 
     async def _watch_player(self) -> None:
         """Jaga supaya mpv yang mati tidak berubah jadi aplikasi yang membeku."""
@@ -1387,6 +1823,26 @@ class MusicBox(App):
         box.remove_children()
         for label, action in self.SONG_ACTIONS.get(table_id or "", []):
             box.mount(TransportButton(label, action, classes="song-act"))
+        self._fit_info_panel()
+
+    def _fit_info_panel(self) -> None:
+        """Kecilkan sampul kalau panel kanan tidak cukup tinggi.
+
+        Ambangnya dihitung dari isi panel — sampul penuh, beberapa baris teks,
+        dan sebanyak apa pun tombol aksi yang sedang aktif — bukan dari angka
+        tetap, supaya tetap benar di terminal berukuran apa pun dan saat
+        visualizer dinyalakan atau dimatikan.
+        """
+        try:
+            info = self.query_one("#info")
+            n_aksi = len(self.query_one("#song-actions", Vertical).children)
+        except Exception:
+            return
+        butuh = 14 + 5 + n_aksi          # sampul + teks ringkas + tombol
+        info.set_class(info.content_size.height < butuh, "sempit")
+
+    def on_resize(self, event) -> None:
+        self._fit_info_panel()
 
     async def action_play_selected(self) -> None:
         """Putar lagu yang sedang disorot, dari tab mana pun."""
@@ -1730,27 +2186,52 @@ class MusicBox(App):
             self.downloads = json.loads(DOWNLOADS_LOG.read_text())
         except (OSError, json.JSONDecodeError):
             self.downloads = []
+        self.refresh_downloads_table()
+
+    def refresh_downloads_table(self) -> None:
         table = self.query_one("#downloads", DataTable)
         table.clear()
         for d in self.downloads:
             table.add_row(d.get("title", "?"), d.get("format", "?"),
-                          d.get("status", "?"), d.get("time", ""))
+                          progress_cell(d), d.get("time", ""))
 
-    def log_download(self, entry: dict) -> None:
-        self.downloads.insert(0, entry)
-        self.downloads = self.downloads[:100]
+    def save_downloads(self) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         try:
             DOWNLOADS_LOG.write_text(json.dumps(self.downloads, indent=1))
         except OSError:
             pass
-        self.query_one("#queue", DataTable).add_columns("#", "Judul", "Sumber")
-        # Enter pada node album jangan ikut melipatnya: album yang menutup
-        # membuat pemutaran terlihat seperti tidak terjadi apa-apa.
-        self.query_one("#pltree", Tree).auto_expand = False
-        self.load_downloads()
-        self.load_queue()
-        self.load_playlists()
+
+    def log_download(self, entry: dict) -> None:
+        self.downloads.insert(0, entry)
+        self.downloads = self.downloads[:100]
+        self.save_downloads()
+        self.refresh_downloads_table()
+
+    def _tick_downloads(self) -> None:
+        """Perbarui sel progres unduhan yang sedang berjalan.
+
+        Hanya sel yang berubah yang disentuh. Membangun ulang seluruh tabel tiap
+        setengah detik akan melompatkan kursor pengguna terus-menerus, dan baris
+        yang baru selesai perlu ikut disegarkan sekali lagi supaya statusnya
+        berubah dari bar menjadi "selesai".
+        """
+        aktif = {i for i, d in enumerate(self.downloads)
+                 if d.get("status") == "berjalan"}
+        perlu = aktif | self._dl_terakhir
+        if not perlu:
+            return
+        try:
+            table = self.query_one("#downloads", DataTable)
+        except Exception:
+            return
+        for i in sorted(perlu):
+            if i < len(self.downloads):
+                try:
+                    table.update_cell_at((i, 2), progress_cell(self.downloads[i]))
+                except Exception:
+                    pass
+        self._dl_terakhir = aktif
 
     def _selected_result(self) -> dict | None:
         table = self.query_one("#results", DataTable)
@@ -1775,18 +2256,27 @@ class MusicBox(App):
         cmd.append(url)
         fmt, title = self.dl_format, r["title"]
         self.notify(f"unduh: {fmt}", timeout=3)
-        self.log_download({"title": title, "format": fmt, "status": "berjalan",
-                           "url": url, "time": time.strftime("%H:%M")})
+        entry = {"title": title, "format": fmt, "status": "berjalan",
+                 "url": url, "time": time.strftime("%H:%M"), "percent": 0.0}
+        self.log_download(entry)
 
         def run_and_log() -> int:
-            rc = subprocess.run(cmd, capture_output=True, text=True).returncode
-            # Perbarui entri paling atas: itu unduhan yang baru saja dijalankan.
-            if self.downloads:
-                self.downloads[0]["status"] = "selesai" if rc == 0 else "gagal"
-                try:
-                    DOWNLOADS_LOG.write_text(json.dumps(self.downloads, indent=1))
-                except OSError:
-                    pass
+            # Dibaca baris demi baris supaya progresnya bisa ditampilkan, bukan
+            # ditelan sampai selesai. Entri dipegang lewat objeknya, bukan lewat
+            # indeks: unduhan lain yang menyusul akan menggeser posisinya.
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True,
+                                    bufsize=1, errors="replace")
+            for line in proc.stdout or ():
+                m = DL_PROGRESS.search(line)
+                if m:
+                    entry["percent"] = float(m.group(1))
+                    entry["size"] = m.group(2)
+                    entry["speed"] = m.group(3) or ""
+                    entry["eta"] = m.group(4) or ""
+            rc = proc.wait()
+            entry["status"] = "selesai" if rc == 0 else "gagal"
+            self.save_downloads()
             return rc
 
         self.run_worker(run_and_log, thread=True, name="download",
@@ -1891,6 +2381,7 @@ class MusicBox(App):
         btn.update("◫ cava" if self.cava_on else "◫ off")
         btn.set_class(self.cava_on, "on")
         btn.set_class(not self.cava_on, "off")
+        self.call_after_refresh(self._fit_info_panel)
         if self.cava_on:
             self.run_worker(cava.restart(), exclusive=False)
         else:
@@ -1983,6 +2474,8 @@ class MusicBox(App):
 
     def on_unmount(self) -> None:
         self.save_resume()
+        if self.mpris is not None:
+            self.mpris.stop()
         self.player.shutdown()
         try:
             self.query_one("#cava", CavaBars).stop()

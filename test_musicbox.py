@@ -19,17 +19,10 @@ mod.DOWNLOADS_LOG = mod.STATE_DIR / "downloads.json"
 mod.LIBRARY_CACHE = mod.STATE_DIR / "library.json"
 mod.MPV_SOCKET = Path(tmp) / "mpv.sock"
 
-def _mpris_opt_in() -> bool:
-    """Plugin tetap bisa ditemukan saat MUSICBOX_MPRIS=1 — kalau memang terpasang."""
-    if not any(Path(p).exists() for p in
-               ("/usr/lib/mpv/mpris.so", "/usr/lib/mpv-mpris/mpris.so",
-                "/usr/share/mpv/scripts/mpris.so")):
-        return True                      # tidak terpasang, tidak ada yang diuji
-    os.environ["MUSICBOX_MPRIS"] = "1"
-    try:
-        return mod.MpvPlayer._mpris_script() is not None
-    finally:
-        del os.environ["MUSICBOX_MPRIS"]
+# Audio diarahkan ke null: suite ini memutar lagu sungguhan, dan berebut
+# perangkat dengan musicbox yang sedang dipakai mendengarkan musik membuat mpv
+# gagal membuka stream — lagunya tidak jadi diputar dan hasil ujinya menyesatkan.
+os.environ.setdefault("MUSICBOX_AO", "null")
 
 fails, checks = [], []
 def check(name, cond, detail=""):
@@ -45,11 +38,22 @@ async def main():
 
         check("aplikasi hidup", app.is_running)
         check("mpv tersambung", app.player.writer is not None)
-        # mpv-mpris sengaja mati secara bawaan: versi 1.2 membunuh mpv di
-        # sebagian perpindahan lagu. Yang diuji sekarang justru bahwa ia TIDAK
-        # ikut termuat kecuali diminta lewat MUSICBOX_MPRIS=1.
-        check("mpris mati secara bawaan", not app.player.mpris)
-        check("mpris bisa dinyalakan lagi", _mpris_opt_in())
+        # Plugin mpv-mpris sengaja tidak dipakai: versinya di sistem ini
+        # membunuh mpv di sebagian perpindahan lagu. Menahan diri dari
+        # `--script=` saja tidak cukup, karena paketnya memasang symlink di
+        # /etc/mpv/scripts/ yang dimuat mpv tanpa diminta.
+        args = Path(f"/proc/{app.player.proc.pid}/cmdline").read_bytes().decode(
+            errors="replace").split("\0")
+        check("plugin mpv-mpris benar-benar tidak dimuat",
+              "--load-scripts=no" in args and not app.player.mpris)
+        # Ikon di widget media desktop tetap ada, tapi didaftarkan musicbox
+        # sendiri lewat D-Bus, bukan menumpang proses yang bisa ikut mati.
+        check("musicbox mendaftar sendiri sebagai pemutar MPRIS",
+              app.mpris is not None and app.mpris.aktif,
+              "aktif" if (app.mpris and app.mpris.aktif) else
+              "tidak aktif (python-dbus tidak ada?)")
+        check("teks tak sah tidak diteruskan ke D-Bus",
+              mod.dbus_safe("a\udcffb") == "a?b", repr(mod.dbus_safe("a\udcffb")))
 
         lib = app.query_one("#library", DataTable)
         check("library terisi", lib.row_count > 0, f"{lib.row_count} baris")

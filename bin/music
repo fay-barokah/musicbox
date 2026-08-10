@@ -112,7 +112,13 @@ do_download() {
     else
         fmt_args=(--audio-format mp3 --audio-quality 0)
     fi
-    yt-dlp -x "${fmt_args[@]}" \
+    # Saat keluaran bukan terminal (dipanggil musicbox), progres ditulis satu
+    # baris per pembaruan supaya bisa dibaca program lain. Di terminal biarkan
+    # apa adanya: yt-dlp menimpa satu baris dengan \r, jauh lebih rapi dibaca
+    # manusia daripada ratusan baris berturut-turut.
+    local progres=()
+    [ -t 1 ] || progres=(--newline)
+    yt-dlp -x "${fmt_args[@]}" "${progres[@]}" \
            --embed-thumbnail --embed-metadata --no-playlist \
            -o "$MUSIC_DIR/%(title)s.%(ext)s" "$src" || return 1
     echo "✓ selesai"

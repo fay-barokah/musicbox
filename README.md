@@ -32,10 +32,13 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
 - **Sampul sungguhan** lewat sixel, bukan blok ASCII.
 - **Penanda lagu aktif** di daftar library, antrean, dan album.
 - **Lanjut dari terakhir** — lagu dan posisi dipulihkan saat dibuka lagi.
+- **Unduhan bergaya pacman** — bar progres, ukuran, kecepatan, dan sisa waktu,
+  bergerak langsung di tab Unduhan.
 - **Tahan banting**: kalau mpv mati mendadak, musicbox menghidupkannya lagi di
   lagu dan detik yang sama, bukan membeku diam-diam.
-- **MPRIS opsional** lewat `MUSICBOX_MPRIS=1` — mati secara bawaan, alasannya
-  di [Catatan teknis](#catatan-teknis).
+- **MPRIS bawaan** — musicbox mendaftar sendiri ke D-Bus, jadi tampil di widget
+  media desktop lengkap dengan judul, sampul, dan tombol, tanpa menumpang
+  plugin mpv yang bisa menjatuhkan pemutarnya.
 
 ## Kebutuhan
 
@@ -45,7 +48,7 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
 | `python-textual` | antarmuka (wajib) |
 | `python-mutagen` | baca tag & sampul (wajib) |
 | `yt-dlp` | cari dan unduh dari YouTube |
-| `mpv-mpris` | tampil di widget media desktop (opsional, lihat catatan) |
+| `python-dbus` | tampil di widget media desktop (opsional) |
 | `cava` | visualizer |
 | `python-textual-image` | sampul sixel |
 
@@ -93,9 +96,10 @@ python3 test_musicbox.py
 ```
 
 Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 75 hal: semua handler keybind ada dan tidak melempar exception,
+Memeriksa 76 hal: semua handler keybind ada dan tidak melempar exception,
 perpindahan tab, antrean, album, panel aksi kontekstual, ekstraksi sampul,
-perintah yang dikirim radio, dan pemulihan setelah mpv dibunuh di tengah lagu.
+perintah yang dikirim radio, pendaftaran MPRIS, dan pemulihan setelah mpv
+dibunuh di tengah lagu.
 
 Suite ini sengaja tidak menyentuh jaringan supaya cepat dan tidak bergantung
 pada YouTube. Jalur berjaringan — pencarian, streaming, radio, dan unduhan mp3
@@ -128,15 +132,29 @@ waktu untuk ditemukan:
   pada satu Mix: **1 lagu tanpa opsi ini, 509 dengan.** Opsinya dikirim per-file
   lewat `loadfile`, bukan ke seluruh proses mpv, supaya URL biasa yang kebetulan
   membawa `list=` tidak ikut berubah perilakunya.
-- **mpv-mpris dimatikan secara bawaan.** Versi 1.2 (rilis 2023) di atas mpv
-  0.41 sesekali membunuh mpv saat lagu berpindah: thread `cplugin/mpris2`
-  menyusun sinyal `PropertiesChanged` dari string metadata yang sedang diganti
-  mpv, GLib mendapati UTF-8 tak sah di `append_value_to_blob`, lalu memanggil
-  `abort()`. Prosesnya jadi zombie dan musik berhenti di tengah album, sementara
-  antarmukanya tetap memperlihatkan judul terakhir — terlihat seperti aplikasi
-  yang macet padahal yang mati ada di bawahnya. Terukur di sini: **3 dari 30
-  perpindahan lagu gagal dengan plugin, 0 dari 30 tanpa.** Nyalakan lagi dengan
-  `MUSICBOX_MPRIS=1 musicbox` kalau versi di sistem sudah diperbaiki.
+- **MPRIS didaftarkan sendiri, plugin mpv-mpris tidak dipakai.** Versi 1.2
+  (rilis 2023) di atas mpv 0.41 sesekali membunuh mpv saat lagu berpindah:
+  thread `cplugin/mpris2` menyusun sinyal `PropertiesChanged` dari string
+  metadata yang sedang diganti mpv, GLib mendapati UTF-8 tak sah di
+  `append_value_to_blob`, lalu memanggil `abort()`. Prosesnya jadi zombie dan
+  musik berhenti di tengah album, sementara antarmukanya tetap memperlihatkan
+  judul terakhir — terlihat seperti aplikasi yang macet padahal yang mati ada di
+  bawahnya. Terukur di sini: **3 dari 30 perpindahan lagu gagal dengan plugin,
+  0 dari 30 tanpa.** Karena ikon di widget desktop tetap diinginkan, musicbox
+  mendaftar sendiri ke D-Bus lewat `python-dbus`, di thread terpisah dengan main
+  loop GLib. Teks dibersihkan dulu (`dbus_safe`) supaya kesalahan yang sama
+  tidak berpindah tangan. Kalau `python-dbus` tidak ada, musicbox tetap jalan —
+  hanya tanpa ikon.
+- **Menahan diri dari `--script=` saja tidak cukup.** Paket mpv-mpris memasang
+  symlink di `/etc/mpv/scripts/mpris.so`, dan mpv memuat isi direktori itu untuk
+  setiap pemakaian tanpa diminta. Yang benar-benar mematikannya adalah
+  `--load-scripts=no`. Sebelum ini ketahuan, plugin yang "sudah dimatikan"
+  ternyata masih ikut termuat dan masih menjatuhkan mpv.
+- **`MUSICBOX_AO` memaksa keluaran audio.** Dipakai pengujian dengan nilai
+  `null`. Tanpa itu suite berebut perangkat audio dengan musicbox yang sedang
+  benar-benar dipakai mendengarkan musik, mpv gagal membuka stream
+  (`Device or resource busy`), lagunya tidak jadi diputar, dan hasil ujinya
+  menyesatkan — kegagalan yang tampak seperti bug aplikasi padahal bukan.
 - **mpv diawasi dan dihidupkan ulang.** Karena kematian seperti di atas bisa
   datang dari mana saja — plugin pihak ketiga, OOM killer, dekoder yang menyerah
   — proses mpv diperiksa tiap detik. Kalau mati, ia dibangkitkan lagi dengan
