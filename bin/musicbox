@@ -773,6 +773,18 @@ def extract_cover(path: Path) -> Path | None:
         return None
 
 
+def aspek_gambar(path: Path) -> float | None:
+    """Rasio lebar:tinggi sebuah gambar, atau None kalau tidak terbaca."""
+    try:
+        from PIL import Image as _PILImage
+
+        with _PILImage.open(path) as im:
+            w, h = im.size
+        return (w / h) if h else None
+    except Exception:
+        return None
+
+
 def fetch_thumbnail(video_id: str) -> Path | None:
     """Unduh thumbnail YouTube. Ukuran mq sudah cukup untuk panel selebar 36."""
     COVER_CACHE.mkdir(parents=True, exist_ok=True)
@@ -1050,6 +1062,21 @@ def fetch_lyrics(judul: str, artis: str = "", durasi: float = 0.0) -> dict:
     return hasil
 
 
+def fetch_lyrics_cached_only(judul: str, artis: str = "",
+                             durasi: float = 0.0) -> dict | None:
+    """Baca lirik dari simpanan saja, tanpa menyentuh jaringan.
+
+    Dipakai di jalur yang berjalan berkali-kali tiap detik — memanggil LRCLIB
+    dari sana akan membanjiri layanannya sekaligus membekukan pemanggilnya.
+    """
+    import hashlib
+    kunci = hashlib.sha1(f"{judul}|{artis}|{int(durasi)}".encode()).hexdigest()[:16]
+    try:
+        return json.loads((LYRICS_CACHE / f"{kunci}.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def lyrics_cached(judul: str, artis: str = "", durasi: float = 0.0) -> bool | None:
     """True/False kalau sudah pernah dicari, None kalau belum pernah."""
     import hashlib
@@ -1072,6 +1099,18 @@ def load_scheme() -> dict:
 
 
 # --------------------------------------------------------------- aplikasi
+
+
+class FixedHeader(Header):
+    """Header yang tidak berubah tinggi saat diklik.
+
+    Header bawaan Textual memperbesar dirinya sendiri setiap kali disentuh.
+    Seluruh tata letak di bawahnya ikut melompat, dan kliknya hampir selalu
+    tidak disengaja — pengguna cuma hendak memilih tab tepat di bawahnya.
+    """
+
+    def _on_click(self) -> None:
+        pass
 
 
 class SeekBar(Static):
@@ -1349,6 +1388,7 @@ class LyricsView(Static):
         self.polos = ""
         self.pesan = "mencari lirik…"
         self.idx = -1
+        self._tinggi_terakhir = 12
 
     def set_lyrics(self, data: dict) -> None:
         self.lirik = [(float(t), s) for t, s in (data.get("synced") or [])]
@@ -1378,17 +1418,26 @@ class LyricsView(Static):
     def render(self) -> str:
         if not self.lirik:
             return self.polos or self.pesan
-        tinggi = max(5, self.size.height or 12)
-        sekitar = tinggi // 2
-        mulai = max(0, self.idx - sekitar + 1)
-        potong = self.lirik[mulai:mulai + tinggi]
+        # Tinggi 0 terjadi sesaat setelah layar dipasang atau diubah ukurannya.
+        # Kalau dipakai apa adanya, tidak ada satu baris pun yang digambar dan
+        # liriknya terlihat lenyap padahal datanya utuh.
+        tinggi = self.size.height or self._tinggi_terakhir
+        tinggi = max(3, tinggi)
+        self._tinggi_terakhir = tinggi
+
+        # Baris aktif ditahan tepat di tengah dengan cara mengisi kekurangan di
+        # atas dan di bawah memakai baris kosong. Tanpa bantalan itu, sorotan
+        # merangkak dari atas ke tengah di awal lagu lalu merangkak lagi ke
+        # bawah di akhir — persis yang membuatnya terasa tidak tenang.
+        tengah = tinggi // 2
         keluar = []
-        for i, (_, teks) in enumerate(potong, start=mulai):
-            teks = teks or "♪"
-            if i == self.idx:
-                keluar.append(f"[b]▸ {teks}[/b]")
-            else:
-                keluar.append(f"[dim]  {teks}[/dim]")
+        for offset in range(-tengah, tinggi - tengah):
+            i = self.idx + offset
+            if i < 0 or i >= len(self.lirik):
+                keluar.append("")
+                continue
+            teks = self.lirik[i][1] or "♪"
+            keluar.append(f"[b]▸ {teks}[/b]" if offset == 0 else f"[dim]  {teks}[/dim]")
         return "\n".join(keluar)
 
 
@@ -1419,6 +1468,8 @@ class PlayerScreen(ModalScreen[None]):
                     yield Static(id="player-sumber")
             yield LyricsView(id="player-lirik")
             yield Static(id="player-waktu")
+            yield Static("[dim]esc kembali · space main/jeda · n/p lagu · "
+                         "←/→ geser 5 detik[/dim]", id="player-bantuan")
 
     def on_mount(self) -> None:
         self.set_interval(0.3, self._tick)
@@ -1591,11 +1642,9 @@ class MusicBox(App):
     /* Tinggi sampul dipatok supaya teks di bawahnya tidak melompat-lompat
        saat berpindah antar lagu dengan rasio gambar berbeda. */
     #cover { height: 14; width: 1fr; background: transparent; }
-    #cover Image { width: 1fr; height: 14; }
     /* Sampul mengecil saat panel pendek — misalnya ketika visualizer menyala.
        Yang harus mengalah adalah gambarnya, bukan tombol aksinya. */
     #info.sempit #cover { height: 8; }
-    #info.sempit #cover Image { height: 8; }
     #info-text { height: auto; background: transparent; }
     /* Dipaku ke dasar panel. Sebelumnya tombol ini ikut terdorong keluar
        begitu ruang menyempit, dan aksi per-lagu jadi tak terjangkau sama
@@ -1682,6 +1731,7 @@ class MusicBox(App):
         overflow-y: auto;
     }
     #player-waktu { height: 1; color: $cae-on-variant; padding: 0 0 0 3; }
+    #player-bantuan { height: 1; color: $cae-on-variant; padding: 0 0 0 3; }
 
     #np-controls { height: 1; align-horizontal: center; }
     .tbtn {
@@ -1824,7 +1874,7 @@ class MusicBox(App):
     # -- susunan ----------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        yield FixedHeader(show_clock=True)
         with Vertical():
             with Horizontal(id="main"):
                 with TabbedContent(id="tabs"):
@@ -1910,24 +1960,40 @@ class MusicBox(App):
             return
         self.push_screen(PlayerScreen())
 
+    def _arg_lirik(self) -> tuple[str, str, float]:
+        """Argumen baku untuk mencari lirik lagu yang sedang berbunyi.
+
+        Dirakit di satu tempat supaya kunci simpanannya selalu sama dari mana
+        pun dipanggil. Kalau argumennya berbeda sedikit saja, hasil yang sudah
+        tersimpan tidak akan pernah ditemukan lagi dan liriknya diminta ulang
+        selamanya.
+        """
+        st = self.player.state
+        path = st.get("path")
+        mentah = st.get("title") or (Path(str(path)).stem if path else "")
+        artis = ""
+        if path and not str(path).startswith("http"):
+            lagu = next((x for x in self.library.tracks
+                         if x["path"] == str(path)), None)
+            if lagu:
+                mentah = lagu["title"] or mentah
+                artis = lagu.get("artist") or ""
+        return mentah, artis, float(st.get("duration") or 0.0)
+
     def minta_lirik(self, layar=None) -> None:
         """Ambil lirik lagu yang sedang berbunyi, di latar belakang."""
-        info = self.now_playing_info()
-        judul = info.get("title") or self.player.state.get("title") or ""
+        judul, artis, durasi = self._arg_lirik()
         if not judul:
             return
-        artis = info.get("artist") or ""
-        durasi = float(self.player.state.get("duration") or 0.0)
         self._layar_lirik = layar
         self.run_worker(lambda: fetch_lyrics(judul, artis, durasi), thread=True,
                         name="lyrics", group="lyrics", exit_on_error=False)
 
-    def _tandai_lirik(self, judul: str, artis: str, durasi: float) -> None:
-        """Cari tahu ketersediaan lirik sebuah lagu, diam-diam, untuk penanda."""
-        if not judul:
-            return
-        if lyrics_cached(judul, artis, durasi) is not None:
-            return                     # sudah pernah dicari, tidak perlu lagi
+    def _tandai_lirik(self) -> None:
+        """Cari tahu ketersediaan lirik lagu ini, diam-diam, untuk penanda ♪."""
+        judul, artis, durasi = self._arg_lirik()
+        if not judul or lyrics_cached(judul, artis, durasi) is not None:
+            return                     # kosong, atau sudah pernah dicari
         self.run_worker(lambda: (fetch_lyrics(judul, artis, durasi), "tandai"),
                         thread=True, name="lyrmark", group="lyrics",
                         exit_on_error=False)
@@ -1945,7 +2011,8 @@ class MusicBox(App):
             return {}
         if self._np_cache.get("path") == path:
             return self._np_cache["info"]
-        info: dict = {"title": st.get("title") or Path(str(path)).stem}
+        mentah = st.get("title") or Path(str(path)).stem
+        info: dict = {"title": mentah, "mentah": mentah}
         try:
             if str(path).startswith("http"):
                 vid = ""
@@ -1969,6 +2036,28 @@ class MusicBox(App):
                     info["art"] = str(sampul)
         except Exception:
             pass
+
+        # Artis dan judul yang rapi bukan sekadar demi enak dilihat: widget
+        # media desktop memakai keduanya untuk mencari liriknya SENDIRI
+        # (Caelestia memanggil Lyrics.setTrack(artis, judul, album, durasi)).
+        # Judul YouTube mentah dengan artis "—" membuat pencarian itu pasti
+        # gagal, dan panel liriknya selalu kosong.
+        if not info.get("artist"):
+            tebak_artis, tebak_judul = bersihkan_judul(info["title"])
+            if tebak_artis:
+                info["artist"] = tebak_artis
+            if tebak_judul:
+                info["title"] = tebak_judul
+        # Kalau lirik untuk lagu ini sudah pernah ketemu, pakai nama resmi dari
+        # basis datanya — itu ejaan yang paling mungkin dikenali orang lain.
+        try:
+            simpan = fetch_lyrics_cached_only(*self._arg_lirik())
+            if simpan and simpan.get("ada"):
+                info["title"] = simpan.get("judul") or info["title"]
+                info["artist"] = simpan.get("artis") or info.get("artist", "")
+        except Exception:
+            pass
+
         self._np_cache = {"path": path, "info": info}
         return info
 
@@ -2054,10 +2143,7 @@ class MusicBox(App):
             self._marked_path = path
             self._mark_now_playing(path)
             self._np_cache = {}
-            info = self.now_playing_info()
-            self._tandai_lirik(info.get("title") or st.get("title") or "",
-                               info.get("artist") or "",
-                               float(st.get("duration") or 0.0))
+            self._tandai_lirik()
         title = st.get("title") or "tidak ada yang diputar"
         if st.get("pause") and st.get("path"):
             title = f"⏸  {title}"
@@ -2289,6 +2375,13 @@ class MusicBox(App):
             return
         self.update_info(table_id, table.cursor_row)
 
+    def _tinggi_sampul(self) -> int:
+        """Tinggi sampul dalam baris, mengikuti kelas sempit di panel info."""
+        try:
+            return 8 if self.query_one("#info").has_class("sempit") else 14
+        except Exception:
+            return 14
+
     def show_cover(self, image_path: Path | None) -> None:
         """Tampilkan sampul di panel kanan.
 
@@ -2313,7 +2406,19 @@ class MusicBox(App):
                 from textual_image.widget import Image as ImageWidget
 
             holder.display = True
-            holder.mount(ImageWidget(str(image_path)))
+            gambar = ImageWidget(str(image_path))
+            # Lebar dihitung dari rasio gambar aslinya, bukan dipaksa memenuhi
+            # panel. Thumbnail YouTube itu 16:9; direntangkan ke kotak, wajah
+            # orang jadi gepeng. Sel terminal kira-kira dua kali lebih tinggi
+            # daripada lebarnya, jadi rasionya dikalikan dua.
+            tinggi = self._tinggi_sampul()
+            rasio = aspek_gambar(image_path)
+            if rasio:
+                lebar = max(4, min(int(round(tinggi * rasio * 2)),
+                                   max(4, holder.size.width or 32)))
+                gambar.styles.width = lebar
+            gambar.styles.height = tinggi
+            holder.mount(gambar)
         except Exception:
             # Terminal tanpa dukungan gambar tidak boleh membuat aplikasi mati;
             # panel cukup kembali ke teks saja.
