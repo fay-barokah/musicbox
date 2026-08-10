@@ -2470,6 +2470,17 @@ class MusicBox(App):
 
     def on_resize(self, event) -> None:
         self._fit_info_panel()
+        # Bar bawah digambar dari nilai yang jarang berubah (judul, posisi,
+        # volume), jadi setelah ukuran jendela berubah widget-widgetnya tidak
+        # punya alasan menggambar ulang — isinya baru muncul setelah tersentuh
+        # kursor. Dipaksa segar di sini.
+        self.refresh_now_playing()
+        for pilih in ("#np-bar", "#vol-bar", "#np-title", "#np-elapsed",
+                      "#np-total", "#cava"):
+            try:
+                self.query_one(pilih).refresh(layout=True)
+            except Exception:
+                pass
 
     async def action_play_selected(self) -> None:
         """Putar lagu yang sedang disorot, dari tab mana pun."""
