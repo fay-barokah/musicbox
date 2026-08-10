@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 from textual.app import App, ComposeResult
@@ -799,7 +800,12 @@ def yt_search(query: str, limit: int = 20) -> list[dict]:
     pick_video() di skrip `music`.
     """
     tab = "\t"
-    fmt = tab.join(("%(id)s", "%(duration>%H:%M:%S)s", "%(uploader).24s", "%(title).80s"))
+    # view_count ikut terbawa oleh --flat-playlist, jadi gratis. like_count
+    # TIDAK: mengambilnya menuntut ekstraksi penuh tiap video, sekitar lima
+    # detik per judul — dua menit hanya untuk memberi angka pada satu layar
+    # hasil. Likes diambil belakangan, hanya untuk baris yang disorot.
+    fmt = tab.join(("%(id)s", "%(duration>%H:%M:%S)s", "%(uploader).24s",
+                    "%(view_count)s", "%(title).80s"))
     try:
         out = subprocess.run(
             ["yt-dlp", "--skip-download", "--no-warnings", "--flat-playlist",
@@ -811,36 +817,119 @@ def yt_search(query: str, limit: int = 20) -> list[dict]:
     results = []
     for line in out.splitlines():
         parts = line.split(tab)
-        if len(parts) == 4:
+        if len(parts) == 5:
             results.append({"id": parts[0], "duration": parts[1],
-                            "uploader": parts[2], "title": parts[3]})
+                            "uploader": parts[2], "views": parts[3],
+                            "title": parts[4]})
     return results
 
 
-# Baris progres yt-dlp dengan --newline, misalnya:
+def yt_likes(video_id: str) -> tuple[str, str]:
+    """Ambil jumlah suka satu video. Lambat — panggil hanya saat dibutuhkan."""
+    try:
+        out = subprocess.run(
+            ["yt-dlp", "--skip-download", "--no-warnings",
+             "--print", "%(like_count)s", yt_url(video_id)],
+            capture_output=True, text=True, timeout=60,
+        ).stdout.strip().splitlines()
+        return video_id, (out[0] if out else "")
+    except (OSError, subprocess.TimeoutExpired):
+        return video_id, ""
+
+
+def fmt_count(nilai) -> str:
+    """1234567 -> 1,2 jt. Angka mentah sulit dibandingkan sekilas."""
+    try:
+        n = float(str(nilai).replace(",", ""))
+    except (TypeError, ValueError):
+        return "—"
+    for batas, akhiran in ((1e9, " M"), (1e6, " jt"), (1e3, " rb")):
+        if n >= batas:
+            return f"{n / batas:.1f}".replace(".", ",") + akhiran
+    return str(int(n))
+
+
+# Baris angka mentah dari --progress-template di `music`:
+#   MBPROG|<terunduh>|<total>|<perkiraan total>|<byte per detik>|<sisa detik>
+# Nilai yang belum diketahui datang sebagai "NA".
+DL_TEMPLATE = re.compile(r"MBPROG\|(\S*)\|(\S*)\|(\S*)\|(\S*)\|(\S*)")
+
+# Cadangan untuk `music` versi lama yang belum mengirim MBPROG:
 #   [download]  45.2% of    3.85MiB at    1.20MiB/s ETA 00:02
-# Ukuran kadang berawalan "~" (perkiraan), kecepatan dan ETA bisa "Unknown"
-# atau belum ada sama sekali di pembaruan pertama.
 DL_PROGRESS = re.compile(
     r"\[download\]\s+([\d.]+)%\s+of\s+~?\s*(\S+)"
     r"(?:\s+at\s+(\S+))?(?:\s+ETA\s+(\S+))?")
 
 
+def _angka(teks: str) -> float | None:
+    try:
+        nilai = float(teks)
+    except (TypeError, ValueError):
+        return None
+    return nilai
+
+
+def fmt_bytes(jumlah: float | None) -> str:
+    if not jumlah:
+        return ""
+    for satuan in ("B", "KiB", "MiB", "GiB"):
+        if jumlah < 1024 or satuan == "GiB":
+            return f"{jumlah:.1f}{satuan}"
+        jumlah /= 1024
+    return ""
+
+
+def fmt_eta(detik: float | None) -> str:
+    if detik is None or detik < 0:
+        return ""
+    detik = int(detik)
+    if detik >= 3600:
+        return f"{detik // 3600}:{detik % 3600 // 60:02d}:{detik % 60:02d}"
+    return f"{detik // 60}:{detik % 60:02d}"
+
+
+def parse_progress(line: str, entry: dict) -> bool:
+    """Baca satu baris keluaran unduhan ke dalam entry. True kalau ada isinya."""
+    m = DL_TEMPLATE.search(line)
+    if m:
+        terunduh, total, perkiraan, laju, sisa = (
+            _angka(m.group(i)) for i in range(1, 6))
+        besar = total or perkiraan
+        if besar and terunduh is not None:
+            entry["percent"] = max(0.0, min(100.0, terunduh / besar * 100.0))
+        entry["size"] = fmt_bytes(besar)
+        entry["speed"] = f"{fmt_bytes(laju)}/s" if laju else ""
+        entry["eta"] = fmt_eta(sisa)
+        return True
+    m = DL_PROGRESS.search(line)
+    if m:
+        entry["percent"] = float(m.group(1))
+        entry["size"] = m.group(2)
+        entry["speed"] = "" if (m.group(3) or "") == "Unknown" else (m.group(3) or "")
+        entry["eta"] = "" if (m.group(4) or "") == "Unknown" else (m.group(4) or "")
+        return True
+    return False
+
+
 def progress_cell(entry: dict, width: int = 20) -> str:
     """Sel progres bergaya pacman: bar, persen, ukuran, kecepatan, sisa waktu.
 
-    Unduhan yang sudah selesai cukup menampilkan statusnya — bar penuh yang
-    tertinggal di layar hanya menyita lebar tanpa memberi tahu apa pun.
+    Kurung siku sengaja tidak dipakai sebagai bingkai bar. DataTable merender
+    isinya sebagai markup Rich, dan "[####----]" ditelan mentah-mentah sebagai
+    tag — barnya hilang sama sekali dari layar padahal datanya ada.
+
+    Unduhan yang sudah selesai cukup menampilkan statusnya; bar penuh yang
+    tertinggal hanya menyita lebar tanpa memberi tahu apa pun.
     """
     if entry.get("status") != "berjalan":
         return str(entry.get("status", "?"))
     pct = float(entry.get("percent") or 0.0)
     penuh = int(width * min(pct, 100.0) / 100.0)
-    bar = "#" * penuh + "-" * (width - penuh)
-    bagian = [f"[{bar}] {pct:5.1f}%"]
-    for kunci, awalan in (("size", ""), ("speed", ""), ("eta", "ETA ")):
+    bar = "━" * penuh + "─" * (width - penuh)
+    bagian = [f"{bar} {pct:5.1f}%"]
+    for kunci, awalan in (("size", ""), ("speed", ""), ("eta", "sisa ")):
         nilai = entry.get(kunci)
-        if nilai and nilai != "Unknown":
+        if nilai:
             bagian.append(f"{awalan}{nilai}")
     return "  ".join(bagian)
 
@@ -852,6 +941,123 @@ def yt_url(video_id: str) -> str:
 def yt_radio_url(video_id: str) -> str:
     """Playlist Mix YouTube — rekomendasi berantai, ratusan lagu."""
     return f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
+
+
+# ------------------------------------------------------------------- lirik
+
+
+LYRICS_CACHE = STATE_DIR / "lyrics"
+# Embel-embel judul YouTube yang menyesatkan pencarian lirik: "(1 Hour)",
+# "[slowed + reverb]", "| Best part looped", dan sejenisnya.
+_SAMPAH_JUDUL = re.compile(
+    r"\((?:[^()]*)\)|\[[^\]]*\]|\b(?:official|video|audio|lyrics?|lyric|hd|hq|"
+    r"full|album|version|remix|cover|live|slowed|reverb|sped\s*up|nightcore|"
+    r"loop(?:ed)?|extended|best\s*part|\d+\s*hours?|4k|mv)\b",
+    re.IGNORECASE)
+
+
+def bersihkan_judul(judul: str) -> tuple[str, str]:
+    """Pisahkan artis dan judul dari nama berkas YouTube yang penuh embel-embel.
+
+    Judul unduhan biasanya berbunyi seperti
+    "Golden Brown - The Stranglers | Best part looped (slowed + reverb)".
+    Pencarian lirik hanya butuh lagunya; sisanya justru membuat pencocokan
+    meleset.
+    """
+    # Kanal YouTube gemar memakai huruf hias di luar ASCII — "𝑿𝒆𝒍𝒉" terbaca
+    # seperti kata biasa oleh mata, tapi tidak cocok dengan apa pun saat dicari.
+    # NFKD mengembalikannya ke huruf biasa, sekalian meratakan pemisah lebar
+    # penuh seperti "｜" menjadi "|" supaya pemotongan di bawah ikut kena.
+    teks = unicodedata.normalize("NFKD", judul)
+    teks = teks.split("|")[0]
+    teks = _SAMPAH_JUDUL.sub(" ", teks)
+    teks = re.sub(r"[_·•]+", " ", teks)
+    teks = re.sub(r"\s{2,}", " ", teks).strip(" -–—\t")
+    if " - " in teks:
+        kiri, kanan = (b.strip() for b in teks.split(" - ", 1))
+        return kiri, kanan
+    return "", teks
+
+
+def parse_lrc(teks: str) -> list[tuple[float, str]]:
+    """Ubah LRC menjadi daftar (detik, baris), terurut."""
+    baris: list[tuple[float, str]] = []
+    for row in (teks or "").splitlines():
+        stempel = re.findall(r"\[(\d+):(\d+(?:[.:]\d+)?)\]", row)
+        if not stempel:
+            continue
+        isi = re.sub(r"\[[^\]]*\]", "", row).strip()
+        for menit, detik in stempel:
+            baris.append((int(menit) * 60 + float(detik.replace(":", ".")), isi))
+    return sorted(baris, key=lambda x: x[0])
+
+
+def fetch_lyrics(judul: str, artis: str = "", durasi: float = 0.0) -> dict:
+    """Ambil lirik dari LRCLIB, utamakan yang tersinkron.
+
+    LRCLIB terbuka dan tidak menuntut kunci API. Hasilnya disimpan — termasuk
+    hasil "tidak ada", karena mengulang pencarian yang sudah pasti gagal cuma
+    menambah jeda tiap kali lagunya diputar lagi.
+
+    Kalau beberapa entri cocok, yang durasinya paling dekat dengan lagu inilah
+    yang dipilih: satu judul sering punya banyak versi dengan panjang berbeda,
+    dan stempel waktu dari versi yang salah akan meleset sepanjang lagu.
+    """
+    import hashlib
+    import urllib.parse
+    import urllib.request
+
+    kunci = hashlib.sha1(f"{judul}|{artis}|{int(durasi)}".encode()).hexdigest()[:16]
+    berkas = LYRICS_CACHE / f"{kunci}.json"
+    try:
+        return json.loads(berkas.read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    a, t = bersihkan_judul(judul)
+    if artis:
+        a = artis
+    kueri = " ".join(x for x in (a, t) if x) or judul
+    hasil: dict = {"synced": [], "plain": "", "judul": "", "artis": "", "ada": False}
+    try:
+        req = urllib.request.Request(
+            "https://lrclib.net/api/search?q=" + urllib.parse.quote(kueri),
+            headers={"User-Agent": "musicbox (pemutar musik TUI)"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:
+        data = []
+
+    kandidat = [d for d in data if d.get("syncedLyrics") or d.get("plainLyrics")]
+    if kandidat:
+        def jarak(d):
+            # Yang tersinkron selalu menang atas yang polos, baru soal durasi.
+            return (0 if d.get("syncedLyrics") else 1,
+                    abs((d.get("duration") or 0) - durasi) if durasi else 0)
+        pilih = sorted(kandidat, key=jarak)[0]
+        hasil = {
+            "synced": parse_lrc(pilih.get("syncedLyrics") or ""),
+            "plain": pilih.get("plainLyrics") or "",
+            "judul": pilih.get("trackName") or "",
+            "artis": pilih.get("artistName") or "",
+            "ada": True,
+        }
+    try:
+        LYRICS_CACHE.mkdir(parents=True, exist_ok=True)
+        berkas.write_text(json.dumps(hasil))
+    except OSError:
+        pass
+    return hasil
+
+
+def lyrics_cached(judul: str, artis: str = "", durasi: float = 0.0) -> bool | None:
+    """True/False kalau sudah pernah dicari, None kalau belum pernah."""
+    import hashlib
+    kunci = hashlib.sha1(f"{judul}|{artis}|{int(durasi)}".encode()).hexdigest()[:16]
+    try:
+        return bool(json.loads((LYRICS_CACHE / f"{kunci}.json").read_text())["ada"])
+    except (OSError, json.JSONDecodeError, KeyError):
+        return None
 
 
 # -------------------------------------------------------------------- tema
@@ -1129,6 +1335,155 @@ class PlaylistNameScreen(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class LyricsView(Static):
+    """Lirik yang bergulir mengikuti lagu.
+
+    Yang ditampilkan hanya jendela di sekitar baris yang sedang berbunyi.
+    Menggulirkan seluruh teks lalu menyorot satu baris terasa jauh lebih
+    gelisah daripada menahan baris aktif tetap di tengah.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.lirik: list[tuple[float, str]] = []
+        self.polos = ""
+        self.pesan = "mencari lirik…"
+        self.idx = -1
+
+    def set_lyrics(self, data: dict) -> None:
+        self.lirik = [(float(t), s) for t, s in (data.get("synced") or [])]
+        self.polos = data.get("plain") or ""
+        if not self.lirik and not self.polos:
+            self.pesan = ("lirik tidak ditemukan\n\n"
+                          "[dim]judul unduhan dari YouTube sering\n"
+                          "membawa embel-embel yang membuat\n"
+                          "pencarian meleset[/dim]")
+        self.idx = -1
+        self.refresh()
+
+    def sync(self, posisi: float) -> None:
+        """Pilih baris yang sedang berbunyi pada detik ini."""
+        if not self.lirik:
+            return
+        baru = -1
+        for i, (t, _) in enumerate(self.lirik):
+            if t <= posisi:
+                baru = i
+            else:
+                break
+        if baru != self.idx:
+            self.idx = baru
+            self.refresh()
+
+    def render(self) -> str:
+        if not self.lirik:
+            return self.polos or self.pesan
+        tinggi = max(5, self.size.height or 12)
+        sekitar = tinggi // 2
+        mulai = max(0, self.idx - sekitar + 1)
+        potong = self.lirik[mulai:mulai + tinggi]
+        keluar = []
+        for i, (_, teks) in enumerate(potong, start=mulai):
+            teks = teks or "♪"
+            if i == self.idx:
+                keluar.append(f"[b]▸ {teks}[/b]")
+            else:
+                keluar.append(f"[dim]  {teks}[/dim]")
+        return "\n".join(keluar)
+
+
+class PlayerScreen(ModalScreen[None]):
+    """Halaman pemutar penuh: sampul besar, judul, dan lirik.
+
+    Setara dengan layar "now playing" di Spotify — tempat menikmati satu lagu,
+    bukan menjelajah daftar. Karena itu tidak ada tabel di sini sama sekali.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Kembali"),
+        Binding("q", "close", "Kembali"),
+        Binding("space", "playpause", "Play/Pause"),
+        Binding("n", "next", "Berikut"),
+        Binding("p", "prev", "Sebelum"),
+        Binding("left", "mundur", "-5s"),
+        Binding("right", "maju", "+5s"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="layar-player"):
+            with Horizontal(id="player-atas"):
+                yield Static(id="player-cover")
+                with Vertical(id="player-info"):
+                    yield Static(id="player-judul")
+                    yield Static(id="player-artis")
+                    yield Static(id="player-sumber")
+            yield LyricsView(id="player-lirik")
+            yield Static(id="player-waktu")
+
+    def on_mount(self) -> None:
+        self.set_interval(0.3, self._tick)
+        self.app.call_after_refresh(self._muat)
+
+    def _muat(self) -> None:
+        app = self.app
+        info = app.now_playing_info()
+        st = app.player.state
+        judul = info.get("title") or st.get("title") or "tidak ada yang diputar"
+        self.query_one("#player-judul", Static).update(f"[b]{judul}[/b]")
+        self.query_one("#player-artis", Static).update(info.get("artist") or "—")
+        sumber = st.get("path") or ""
+        self.query_one("#player-sumber", Static).update(
+            f"[dim]{Path(sumber).name if not str(sumber).startswith('http') else sumber}[/dim]")
+        gambar = info.get("art")
+        holder = self.query_one("#player-cover", Static)
+        holder.remove_children()
+        if gambar and app.image_ok:
+            try:
+                try:
+                    from textual_image.widget import SixelImage as ImageWidget
+                except ImportError:
+                    from textual_image.widget import Image as ImageWidget
+                holder.mount(ImageWidget(Path(gambar)))
+            except Exception:
+                pass
+        app.minta_lirik(self)
+
+    def _tick(self) -> None:
+        st = self.app.player.state
+        pos = st.get("time-pos") or 0.0
+        dur = st.get("duration") or 0.0
+        try:
+            lebar = 40
+            isi = int(lebar * (pos / dur)) if dur else 0
+            bar = "━" * isi + "─" * (lebar - isi)
+            tanda = "⏸" if st.get("pause") else "▶"
+            self.query_one("#player-waktu", Static).update(
+                f"{tanda}  {fmt_time(pos)}  {bar}  {fmt_time(dur)}")
+            self.query_one("#player-lirik", LyricsView).sync(pos)
+        except Exception:
+            pass
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    async def action_playpause(self) -> None:
+        await self.app.player.toggle_pause()
+
+    async def action_next(self) -> None:
+        await self.app.player.next_track()
+        self.app.call_after_refresh(self._muat)
+
+    async def action_prev(self) -> None:
+        await self.app.player.prev_track()
+        self.app.call_after_refresh(self._muat)
+
+    async def action_mundur(self) -> None:
+        await self.app.player.seek(-5)
+
+    async def action_maju(self) -> None:
+        await self.app.player.seek(5)
+
+
 class AlbumPicker(ModalScreen[str | None]):
     """Pilih album tujuan, atau buat baru.
 
@@ -1272,6 +1627,7 @@ class MusicBox(App):
         color: $cae-on-surface;
     }
     #yt-input:focus { border: round $cae-primary; }
+    #hasil-status { height: auto; padding: 0 1; color: $cae-on-variant; }
 
     /* Digayakan lewat tipe widget, BUKAN per-id. Menyebut #library dan
        #results satu per satu membuat setiap tabel baru (mis. Unduhan) jatuh
@@ -1303,6 +1659,29 @@ class MusicBox(App):
         margin: 1 1 0 1;
         content-align: center middle;
     }
+
+    PlayerScreen { align: center middle; background: $cae-surface 85%; }
+    #layar-player {
+        width: 100%;
+        height: 100%;
+        padding: 1 3;
+        background: transparent;
+    }
+    #player-atas { height: 16; background: transparent; }
+    #player-cover { width: 34; height: 15; background: transparent; }
+    #player-cover Image { width: 32; height: 15; }
+    #player-info { width: 1fr; padding: 1 0 0 3; background: transparent; }
+    #player-judul { height: auto; color: $cae-primary; }
+    #player-artis { height: auto; color: $cae-on-surface; }
+    #player-sumber { height: auto; color: $cae-on-variant; }
+    #player-lirik {
+        height: 1fr;
+        padding: 1 0 1 3;
+        background: transparent;
+        color: $cae-on-surface;
+        overflow-y: auto;
+    }
+    #player-waktu { height: 1; color: $cae-on-variant; padding: 0 0 0 3; }
 
     #np-controls { height: 1; align-horizontal: center; }
     .tbtn {
@@ -1365,6 +1744,9 @@ class MusicBox(App):
         Binding("d", "download", show=False, description="Unduh"),
         Binding("f", "toggle_format", show=False, description="mp3/opus"),
         Binding("R", "radio", show=False, description="Radio"),
+        Binding("m", "more_results", show=False, description="Muat lagi"),
+        Binding("o", "sort_results", show=False, description="Urutkan"),
+        Binding("L", "player", "Lirik"),
         Binding("x", "delete_track", show=False, description="Hapus"),
         Binding("e", "enqueue", show=False, description="+Antrean"),
         Binding("E", "dequeue", "−Antrean", show=False),
@@ -1387,6 +1769,11 @@ class MusicBox(App):
         self.cava_on = True
         self._dl_terakhir: set[int] = set()
         self._np_cache: dict = {}
+        self._query = ""
+        self._limit = 20
+        self._mencari = False
+        self.sort_views = False
+        self._lyr_mark: dict[str, bool] = {}
         self.mpris: MprisService | None = None
         self.results: list[dict] = []
         self.dl_format = "mp3"
@@ -1446,6 +1833,10 @@ class MusicBox(App):
                     with TabPane("Cari", id="tab-yt"):
                         yield Input(placeholder="cari di YouTube lalu tekan Enter…",
                                     id="yt-input")
+                        # Status pencarian ditulis di sini, bukan sebagai toast
+                        # di pojok: pencarian makan belasan detik dan mata
+                        # pengguna sedang menatap area hasil, bukan pojok layar.
+                        yield Static(id="hasil-status")
                         yield DataTable(id="results", cursor_type="row", zebra_stripes=False)
                     with TabPane("Antrean", id="tab-queue"):
                         yield DataTable(id="queue", cursor_type="row",
@@ -1469,7 +1860,8 @@ class MusicBox(App):
     async def on_mount(self) -> None:
         table = self.query_one("#library", DataTable)
         table.add_columns("Judul", "Artis", "Durasi")
-        self.query_one("#results", DataTable).add_columns("Judul", "Kanal", "Durasi")
+        self.query_one("#results", DataTable).add_columns(
+            "Judul", "Kanal", "Durasi", "Ditonton")
         self.query_one("#downloads", DataTable).add_columns(
             "Judul", "Format", "Progres", "Waktu")
         self.query_one("#queue", DataTable).add_columns("#", "Judul", "Sumber")
@@ -1480,6 +1872,8 @@ class MusicBox(App):
         self.load_queue()
         self.load_playlists()
         self.load_library()
+        self._status_hasil("ketik di atas lalu Enter  ·  "
+                           "m muat lebih banyak  ·  o urutkan")
 
         await self.player.start()
         self.player.on_update = self._schedule_refresh
@@ -1508,6 +1902,35 @@ class MusicBox(App):
     def _schedule_refresh(self) -> None:
         # Dipanggil dari task pembaca IPC; jadwalkan di loop UI.
         self.call_later(self.refresh_now_playing)
+
+    def action_player(self) -> None:
+        """Buka halaman pemutar penuh dengan lirik."""
+        if not self.player.state.get("path"):
+            self.notify("belum ada yang diputar", timeout=3)
+            return
+        self.push_screen(PlayerScreen())
+
+    def minta_lirik(self, layar=None) -> None:
+        """Ambil lirik lagu yang sedang berbunyi, di latar belakang."""
+        info = self.now_playing_info()
+        judul = info.get("title") or self.player.state.get("title") or ""
+        if not judul:
+            return
+        artis = info.get("artist") or ""
+        durasi = float(self.player.state.get("duration") or 0.0)
+        self._layar_lirik = layar
+        self.run_worker(lambda: fetch_lyrics(judul, artis, durasi), thread=True,
+                        name="lyrics", group="lyrics", exit_on_error=False)
+
+    def _tandai_lirik(self, judul: str, artis: str, durasi: float) -> None:
+        """Cari tahu ketersediaan lirik sebuah lagu, diam-diam, untuk penanda."""
+        if not judul:
+            return
+        if lyrics_cached(judul, artis, durasi) is not None:
+            return                     # sudah pernah dicari, tidak perlu lagi
+        self.run_worker(lambda: (fetch_lyrics(judul, artis, durasi), "tandai"),
+                        thread=True, name="lyrmark", group="lyrics",
+                        exit_on_error=False)
 
     def now_playing_info(self) -> dict:
         """Keterangan lagu yang sedang berbunyi, untuk widget media desktop.
@@ -1566,11 +1989,30 @@ class MusicBox(App):
         table.clear()
         tracks = self.library.scan(force=force)
         for t in tracks:
-            table.add_row(t["title"], t["artist"] or "—", fmt_time(t["duration"]))
+            table.add_row(self._label_library(t, self._marked_path),
+                          t["artist"] or "—", fmt_time(t["duration"]))
         self.sub_title = f"library — {len(tracks)} lagu"
         if not tracks:
             self.notify(f"{MUSIC_DIR} kosong. Unduh dengan: music -d \"judul\"",
                         severity="warning", timeout=8)
+
+    def _label_library(self, t: dict, path: str | None) -> str:
+        """Label satu baris library: penanda berbunyi, penanda lirik, lalu judul.
+
+        Keduanya menempati kolom yang sama, jadi harus dirakit di satu tempat.
+        Sebelumnya penanda ▶ ditulis terpisah dan menimpa penanda ♪ setiap kali
+        lagu berganti — tanda lirik hilang tepat saat lagunya mulai berbunyi.
+
+        ♪ hanya untuk lagu yang liriknya sudah terbukti ada. Yang belum pernah
+        dicari dibiarkan polos: janji yang belum tentu ditepati lebih
+        mengganggu daripada diam.
+        """
+        kunci = t["path"]
+        if kunci not in self._lyr_mark:
+            self._lyr_mark[kunci] = bool(
+                lyrics_cached(t["title"], t["artist"] or "", t["duration"]))
+        main = "▶ " if kunci == path else "  "
+        return main + ("♪ " if self._lyr_mark[kunci] else "  ") + t["title"]
 
     def _mark_now_playing(self, path: str | None) -> None:
         """Tandai baris yang sedang berbunyi di semua daftar.
@@ -1582,8 +2024,8 @@ class MusicBox(App):
         try:
             table = self.query_one("#library", DataTable)
             for i, t in enumerate(self.library.tracks):
-                label = (marker if t["path"] == path else "  ") + t["title"]
-                table.update_cell_at((i, 0), label, update_width=False)
+                table.update_cell_at((i, 0), self._label_library(t, path),
+                                     update_width=False)
         except Exception:
             pass
         try:
@@ -1611,6 +2053,11 @@ class MusicBox(App):
         if path != self._marked_path:
             self._marked_path = path
             self._mark_now_playing(path)
+            self._np_cache = {}
+            info = self.now_playing_info()
+            self._tandai_lirik(info.get("title") or st.get("title") or "",
+                               info.get("artist") or "",
+                               float(st.get("duration") or 0.0))
         title = st.get("title") or "tidak ada yang diputar"
         if st.get("pause") and st.get("path"):
             title = f"⏸  {title}"
@@ -1644,10 +2091,61 @@ class MusicBox(App):
         query = event.value.strip()
         if not query:
             return
-        self.notify("mencari…", timeout=2)
+        self._query = query
+        self._limit = 20
+        self._jalankan_pencarian()
+
+    def _jalankan_pencarian(self) -> None:
+        """Mulai pencarian dan perlihatkan bahwa ia sedang berjalan.
+
+        Toast kecil di pojok terlalu mudah terlewat untuk sesuatu yang memakan
+        belasan detik. Statusnya ditulis di area hasil, tempat mata sudah
+        menunggu jawabannya.
+        """
+        q, n = self._query, self._limit
+        self._mencari = True
+        self._status_hasil(f"mencari “{q}”… ({n} hasil teratas)")
+        self.query_one("#tabs").active = "tab-yt"
         # yt-dlp butuh belasan detik; dijalankan di thread supaya UI tidak beku.
-        self.run_worker(lambda: yt_search(query), thread=True,
+        self.run_worker(lambda: yt_search(q, limit=n), thread=True,
                         name="ytsearch", group="yt", exit_on_error=False)
+
+    def _status_hasil(self, teks: str) -> None:
+        self.query_one("#hasil-status", Static).update(teks)
+
+    def action_more_results(self) -> None:
+        """Muat lebih banyak hasil untuk kueri yang sama."""
+        if not self._query:
+            self.notify("cari sesuatu dulu", timeout=3)
+            return
+        if self._mencari:
+            return
+        self._limit = min(self._limit + 20, 100)
+        self._jalankan_pencarian()
+
+    def action_sort_results(self) -> None:
+        """Ganti urutan hasil: bawaan YouTube ↔ paling banyak ditonton."""
+        if not self.results:
+            self.notify("belum ada hasil", timeout=3)
+            return
+        self.sort_views = not self.sort_views
+        self.refresh_results_table()
+        self.notify("urut: terbanyak ditonton" if self.sort_views
+                    else "urut: relevansi", timeout=3)
+
+    def refresh_results_table(self) -> None:
+        table = self.query_one("#results", DataTable)
+        table.clear()
+        if self.sort_views:
+            def kunci(r):
+                try:
+                    return -float(str(r.get("views", "")).replace(",", ""))
+                except ValueError:
+                    return 0.0
+            self.results = sorted(self.results, key=kunci)
+        for r in self.results:
+            table.add_row(r["title"], r["uploader"], r["duration"],
+                          fmt_count(r.get("views")))
 
     def on_worker_state_changed(self, event) -> None:
         from textual.worker import WorkerState
@@ -1661,15 +2159,39 @@ class MusicBox(App):
             if path and cur and cur["id"] == vid:
                 self.show_cover(path)
             return
+        if event.worker.name == "lyrics":
+            layar = getattr(self, "_layar_lirik", None)
+            if layar is not None and layar.is_running:
+                try:
+                    layar.query_one("#player-lirik", LyricsView).set_lyrics(
+                        event.worker.result or {})
+                except Exception:
+                    pass
+            return
+        if event.worker.name == "lyrmark":
+            # Penanda ♪ menyusul begitu ketersediaan liriknya diketahui.
+            self._lyr_mark.clear()
+            self.load_library()
+            return
+        if event.worker.name == "likes":
+            vid, jumlah = event.worker.result or (None, "")
+            cur = self._selected_result()
+            if cur and cur["id"] == vid:
+                cur["likes"] = jumlah
+                self.update_info("results",
+                                 self.query_one("#results", DataTable).cursor_row)
+            return
         if event.worker.name != "ytsearch":
             return
+        self._mencari = False
         self.results = event.worker.result or []
-        table = self.query_one("#results", DataTable)
-        table.clear()
-        for r in self.results:
-            table.add_row(r["title"], r["uploader"], r["duration"])
-        self.notify(f"{len(self.results)} hasil" if self.results else "tidak ada hasil",
-                    timeout=2)
+        self.refresh_results_table()
+        if self.results:
+            lagi = "  ·  m muat lebih banyak" if self._limit < 100 else ""
+            self._status_hasil(f"{len(self.results)} hasil untuk “{self._query}”"
+                               f"  ·  o urutkan{lagi}")
+        else:
+            self._status_hasil(f"tidak ada hasil untuk “{self._query}”")
 
     # -- panel info --------------------------------------------------------
 
@@ -1685,7 +2207,7 @@ class MusicBox(App):
         "tab-lib":   {"delete_track", "enqueue", "rescan", "shuffle",
                       "add_to_playlist"},
         "tab-yt":    {"download", "toggle_format", "radio", "enqueue",
-                      "add_to_playlist"},
+                      "add_to_playlist", "more_results", "sort_results"},
         "tab-queue": {"dequeue", "queue_up", "queue_down", "play_queue",
                       "add_to_playlist"},
         "tab-pl":    {"new_playlist", "delete_playlist", "remove_from_album",
@@ -1850,6 +2372,60 @@ class MusicBox(App):
         if song:
             await self.player.play(song["target"])
 
+    # Petunjuk saat sebuah tab belum punya isi. Panel kosong melompong tidak
+    # memberi tahu apa pun tentang apa yang bisa dilakukan di sana.
+    PETUNJUK = {
+        "results": ("[b]Cari di YouTube[/b]\n\n"
+                    "Ketik di kotak atas lalu tekan Enter.\n\n"
+                    "[dim]contoh:\n"
+                    "  golden brown 1 hour\n"
+                    "  lofi hip hop\n"
+                    "  nama artis - judul lagu[/dim]\n\n"
+                    "[dim]setelah hasil muncul:\n"
+                    "  enter  putar langsung\n"
+                    "  d      unduh ke ~/Music\n"
+                    "  R      radio dari lagu itu\n"
+                    "  +      masukkan ke antrean\n"
+                    "  m      muat lebih banyak\n"
+                    "  o      urutkan terbanyak ditonton[/dim]"),
+        "queue": ("[b]Antrean kosong[/b]\n\n"
+                  "[dim]tambahkan lagu dengan + dari tab\n"
+                  "Library atau Cari, lalu tekan enter\n"
+                  "di sini untuk memutar semuanya.[/dim]"),
+        "library": ("[b]Library kosong[/b]\n\n"
+                    "[dim]unduh lagu dari tab Cari dengan d,\n"
+                    "atau taruh berkas di ~/Music lalu\n"
+                    "tekan r untuk memindai ulang.[/dim]"),
+        "downloads": ("[b]Belum ada unduhan[/b]\n\n"
+                      "[dim]pilih lagu di tab Cari lalu tekan d.\n"
+                      "f mengganti format mp3 / opus.[/dim]"),
+    }
+
+    def _show_cover_for(self, target: str | None) -> None:
+        """Tampilkan sampul sebuah lagu, baik berkas lokal maupun dari YouTube.
+
+        Selalu dipanggil, termasuk saat tidak ada sampulnya — kalau tidak,
+        gambar dari baris yang disorot sebelumnya tertinggal di panel dan
+        seolah-olah menjadi sampul lagu yang sekarang.
+        """
+        if not target:
+            self.show_cover(None)
+            return
+        target = str(target)
+        if target.startswith("http"):
+            vid = ""
+            for bagian in target.split("?", 1)[-1].split("&"):
+                if bagian.startswith("v="):
+                    vid = bagian[2:]
+                    break
+            if vid:
+                self.run_worker(lambda: (vid, fetch_thumbnail(vid)), thread=True,
+                                name="thumb", group="thumb", exit_on_error=False)
+            else:
+                self.show_cover(None)
+        else:
+            self.show_cover(extract_cover(Path(target)))
+
     def update_info(self, table_id: str, idx: int) -> None:
         """Isi panel kanan sesuai baris yang sedang disorot."""
         info = self.query_one("#info-text", Static)
@@ -1872,18 +2448,40 @@ class MusicBox(App):
             r = self.results[idx]
             # Thumbnail diunduh di thread supaya UI tidak beku saat menyorot
             # cepat-cepat melewati daftar hasil.
-            vid = r["id"]
-            self.run_worker(lambda: (vid, fetch_thumbnail(vid)), thread=True,
-                            name="thumb", group="thumb", exit_on_error=False)
+            self._show_cover_for(yt_url(r["id"]))
+            # Likes menuntut ekstraksi penuh, jadi baru diambil untuk baris yang
+            # benar-benar dilihat — dan hanya sekali per video.
+            if "likes" not in r:
+                r["likes"] = "…"
+                vid = r["id"]
+                self.run_worker(lambda: yt_likes(vid), thread=True,
+                                name="likes", group="likes", exit_on_error=False)
             lines = [
                 f"[b]{r['title']}[/b]", "",
                 f"kanal    {r['uploader']}",
                 f"durasi   {r['duration']}",
+                f"ditonton {fmt_count(r.get('views'))}",
+                f"suka     {r['likes'] if r['likes'] == '…' else fmt_count(r['likes'])}",
                 "", f"[dim]{yt_url(r['id'])}[/dim]",
                 "", "[dim]enter putar · d unduh · R radio[/dim]",
             ]
+        elif table_id == "queue" and 0 <= idx < len(self.queue):
+            q = self.queue[idx]
+            target = q.get("target", "")
+            self._show_cover_for(target)
+            lokal = not str(target).startswith("http")
+            lagu = next((x for x in self.library.tracks
+                         if x["path"] == str(target)), None) if lokal else None
+            lines = [f"[b]{q.get('title', '?')}[/b]", "",
+                     f"urutan   {idx + 1} dari {len(self.queue)}",
+                     f"sumber   {q.get('source', '—')}"]
+            if lagu:
+                lines += [f"artis    {lagu['artist'] or '—'}",
+                          f"durasi   {fmt_time(lagu['duration'])}"]
+            lines += ["", f"[dim]{Path(target).name if lokal else target}[/dim]"]
         elif table_id == "downloads" and 0 <= idx < len(self.downloads):
             d = self.downloads[idx]
+            self._show_cover_for(d.get("url"))
             lines = [
                 f"[b]{d.get('title', '?')}[/b]", "",
                 f"format   {d.get('format', '?')}",
@@ -1891,6 +2489,11 @@ class MusicBox(App):
                 f"waktu    {d.get('time', '?')}",
                 "", f"[dim]{d.get('url', '')}[/dim]",
             ]
+        if not lines:
+            # Tidak ada baris yang disorot: tampilkan petunjuk tab ini, bukan
+            # panel kosong yang tidak menjelaskan apa pun.
+            self.show_cover(None)
+            lines = [self.PETUNJUK.get(table_id, "")]
         info.update("\n".join(lines))
 
     # -- antrean -----------------------------------------------------------
@@ -2208,6 +2811,20 @@ class MusicBox(App):
         self.save_downloads()
         self.refresh_downloads_table()
 
+    def _after_download(self) -> None:
+        """Pindai ulang library supaya lagu yang baru turun langsung terlihat."""
+        try:
+            sebelum = len(self.library.tracks)
+            self.load_library(force=True)
+            baru = len(self.library.tracks) - sebelum
+            if baru > 0:
+                self.notify(f"unduhan selesai · {baru} lagu masuk library",
+                            timeout=4)
+            else:
+                self.notify("unduhan selesai", timeout=3)
+        except Exception:
+            pass
+
     def _tick_downloads(self) -> None:
         """Perbarui sel progres unduhan yang sedang berjalan.
 
@@ -2268,15 +2885,14 @@ class MusicBox(App):
                                     stderr=subprocess.STDOUT, text=True,
                                     bufsize=1, errors="replace")
             for line in proc.stdout or ():
-                m = DL_PROGRESS.search(line)
-                if m:
-                    entry["percent"] = float(m.group(1))
-                    entry["size"] = m.group(2)
-                    entry["speed"] = m.group(3) or ""
-                    entry["eta"] = m.group(4) or ""
+                parse_progress(line, entry)
             rc = proc.wait()
             entry["status"] = "selesai" if rc == 0 else "gagal"
             self.save_downloads()
+            # Lagu yang baru turun harus langsung ada di Library. Tanpa ini
+            # pengguna menunggu sesuatu yang tidak akan pernah muncul sendiri.
+            if rc == 0:
+                self.call_from_thread(self._after_download)
             return rc
 
         self.run_worker(run_and_log, thread=True, name="download",

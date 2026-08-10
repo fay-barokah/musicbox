@@ -117,7 +117,14 @@ do_download() {
     # apa adanya: yt-dlp menimpa satu baris dengan \r, jauh lebih rapi dibaca
     # manusia daripada ratusan baris berturut-turut.
     local progres=()
-    [ -t 1 ] || progres=(--newline)
+    if [ ! -t 1 ]; then
+        # Angka mentah, bukan kalimat untuk manusia. musicbox menghitung sendiri
+        # persen, kecepatan, dan sisa waktunya — jauh lebih andal daripada
+        # menebak dari teks yang formatnya berubah-ubah (dan yang kadang
+        # menulis "Unknown" di tengah unduhan yang sebenarnya sehat).
+        progres=(--newline --progress-template
+                 "download:MBPROG|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s")
+    fi
     yt-dlp -x "${fmt_args[@]}" "${progres[@]}" \
            --embed-thumbnail --embed-metadata --no-playlist \
            -o "$MUSIC_DIR/%(title)s.%(ext)s" "$src" || return 1

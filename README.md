@@ -33,7 +33,14 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
 - **Penanda lagu aktif** di daftar library, antrean, dan album.
 - **Lanjut dari terakhir** — lagu dan posisi dipulihkan saat dibuka lagi.
 - **Unduhan bergaya pacman** — bar progres, ukuran, kecepatan, dan sisa waktu,
-  bergerak langsung di tab Unduhan.
+  bergerak langsung di tab Unduhan. Lagu yang selesai langsung masuk Library
+  tanpa perlu memindai ulang.
+- **Halaman pemutar penuh** (`L`) — sampul besar, judul, dan lirik tersinkron
+  yang bergulir mengikuti lagu. Lagu yang liriknya tersedia ditandai ♪ di
+  Library.
+- **Pencarian yang bisa dibaca** — jumlah tayangan di tabel, jumlah suka di
+  panel kanan, urutkan menurut terbanyak ditonton (`o`), dan muat lebih banyak
+  hasil (`m`).
 - **Tahan banting**: kalau mpv mati mendadak, musicbox menghidupkannya lagi di
   lagu dan detik yang sama, bukan membeku diam-diam.
 - **MPRIS bawaan** — musicbox mendaftar sendiri ke D-Bus, jadi tampil di widget
@@ -51,6 +58,9 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
 | `python-dbus` | tampil di widget media desktop (opsional) |
 | `cava` | visualizer |
 | `python-textual-image` | sampul sixel |
+
+Lirik diambil dari [LRCLIB](https://lrclib.net) — terbuka, tanpa kunci API,
+dan hasilnya disimpan supaya lagu yang sama tidak diminta berulang kali.
 
 Terminal yang mendukung sixel (mis. foot, kitty, WezTerm) dibutuhkan untuk
 menampilkan sampul. Tanpa itu panel kanan tetap jalan, hanya tanpa gambar.
@@ -96,10 +106,10 @@ python3 test_musicbox.py
 ```
 
 Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 76 hal: semua handler keybind ada dan tidak melempar exception,
+Memeriksa 88 hal: semua handler keybind ada dan tidak melempar exception,
 perpindahan tab, antrean, album, panel aksi kontekstual, ekstraksi sampul,
-perintah yang dikirim radio, pendaftaran MPRIS, dan pemulihan setelah mpv
-dibunuh di tengah lagu.
+perintah yang dikirim radio, pendaftaran MPRIS, sel progres unduhan, penguraian
+lirik, dan pemulihan setelah mpv dibunuh di tengah lagu.
 
 Suite ini sengaja tidak menyentuh jaringan supaya cepat dan tidak bergantung
 pada YouTube. Jalur berjaringan — pencarian, streaming, radio, dan unduhan mp3
@@ -150,6 +160,22 @@ waktu untuk ditemukan:
   setiap pemakaian tanpa diminta. Yang benar-benar mematikannya adalah
   `--load-scripts=no`. Sebelum ini ketahuan, plugin yang "sudah dimatikan"
   ternyata masih ikut termuat dan masih menjatuhkan mpv.
+- **Kurung siku tidak dipakai untuk bar progres.** DataTable merender isinya
+  sebagai markup Rich, dan `[####----]` ditelan mentah-mentah sebagai tag —
+  barnya hilang sama sekali dari layar padahal datanya ada. Bar sekarang
+  memakai `━` dan `─`.
+- **Progres unduhan dibaca dari angka, bukan kalimat.** `music` memanggil
+  yt-dlp dengan `--progress-template` saat keluarannya bukan terminal, jadi
+  musicbox menerima byte dan detik mentah lalu menghitung sendiri persen,
+  kecepatan, dan sisa waktunya. Menebak dari teks untuk manusia rapuh: formatnya
+  berubah-ubah dan kadang menulis "Unknown" di tengah unduhan yang sehat.
+- **Judul dinormalkan dengan NFKD sebelum mencari lirik.** Kanal YouTube gemar
+  memakai huruf hias di luar ASCII — "𝑮𝒐𝒍𝒅𝒆𝒏 𝑩𝒓𝒐𝒘𝒏" terbaca seperti kata biasa
+  oleh mata, tapi tidak cocok dengan apa pun saat dicari.
+- **`like_count` tidak ikut pencarian.** Ia menuntut ekstraksi penuh tiap video,
+  sekitar lima detik per judul — dua menit hanya untuk mengisi satu layar hasil.
+  `view_count` gratis dari `--flat-playlist`, jadi tayangan masuk tabel dan suka
+  diambil belakangan hanya untuk baris yang benar-benar disorot.
 - **`MUSICBOX_AO` memaksa keluaran audio.** Dipakai pengujian dengan nilai
   `null`. Tanpa itu suite berebut perangkat audio dengan musicbox yang sedang
   benar-benar dipakai mendengarkan musik, mpv gagal membuka stream

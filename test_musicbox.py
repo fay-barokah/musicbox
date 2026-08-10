@@ -192,6 +192,54 @@ async def main():
         except Exception as exc:
             check("ekstraksi sampul", False, f"{type(exc).__name__}: {exc}")
 
+        # Progres unduhan: barnya harus selamat melewati markup Rich. Kurung
+        # siku pernah dipakai sebagai bingkai, dan Rich menelannya sebagai tag
+        # sehingga barnya hilang dari layar padahal datanya ada.
+        from rich.markup import render as _render
+        entri = {"status": "berjalan"}
+        mod.parse_progress("MBPROG|9961472|19965952|NA|454824.0|22", entri)
+        sel = _render(mod.progress_cell(entri)).plain
+        check("bar progres tidak ditelan markup", "━" in sel and "─" in sel, sel[:30])
+        check("progres memuat persen, ukuran, kecepatan, sisa",
+              all(x in sel for x in ("49.9%", "MiB", "/s", "sisa")), sel[-26:])
+        check("progres selesai tidak menyisakan bar",
+              mod.progress_cell({"status": "selesai"}) == "selesai")
+
+        # Lirik: LRC diurutkan menurut waktu, judul dibersihkan dari embel-embel.
+        baris = mod.parse_lrc("[00:20.84]satu\n[01:05.00]tiga\n[00:45.10]dua")
+        check("LRC terurut menurut waktu",
+              [b[1] for b in baris] == ["satu", "dua", "tiga"])
+        _, judul = mod.bersihkan_judul("Golden Brown - The Stranglers | 1 Hour Loop")
+        check("judul dibersihkan dari embel-embel",
+              "Hour" not in judul and "Loop" not in judul, repr(judul))
+        check("lirik yang belum pernah dicari kembali None",
+              mod.lyrics_cached("lagu yang pasti tidak ada xyzzy", "", 0) is None)
+        # Kanal YouTube gemar memakai huruf hias di luar ASCII. Tanpa
+        # normalisasi, judul seperti ini tidak cocok dengan apa pun.
+        _, hias = mod.bersihkan_judul(
+            "\U0001d47e\U0001d490\U0001d48d\U0001d489\U0001d486\U0001d489 "
+            "\U0001d475\U0001d493\U0001d490\U0001d498\U0001d489 - "
+            "\U0001d47b\U0001d489\U0001d486")
+        check("huruf hias dinormalkan jadi huruf biasa", hias == "The",
+              repr(hias))
+
+        # Penanda ▶ dan ♪ berbagi kolom judul; keduanya harus bertahan bersama.
+        lagu = dict(app.library.tracks[0])
+        app._lyr_mark[lagu["path"]] = True
+        label = app._label_library(lagu, lagu["path"])
+        check("penanda berbunyi dan lirik hidup berdampingan",
+              "▶" in label and "♪" in label and lagu["title"][:12] in label,
+              label[:30])
+
+        # Panel kanan tidak boleh kosong melompong saat tidak ada yang disorot.
+        app.query_one("#tabs").active = "tab-yt"
+        await pilot.pause(0.3)
+        app.update_info("results", -1)
+        await pilot.pause(0.2)
+        petunjuk = str(app.query_one("#info-text", Static).content)
+        check("panel kosong memberi petunjuk", "Cari di YouTube" in petunjuk,
+              petunjuk[:26].replace("\n", " "))
+
         # Radio harus meminta yt-dlp membuka daftar Mix. Tanpa yes-playlist mpv
         # cuma memuat lagu pertamanya dan radionya berhenti di situ. Diperiksa
         # dari perintah yang dikirim, bukan lewat jaringan, supaya tetap cepat
