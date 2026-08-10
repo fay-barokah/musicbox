@@ -45,7 +45,13 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
   lagu dan detik yang sama, bukan membeku diam-diam.
 - **MPRIS bawaan** — musicbox mendaftar sendiri ke D-Bus, jadi tampil di widget
   media desktop lengkap dengan judul, sampul, dan tombol, tanpa menumpang
-  plugin mpv yang bisa menjatuhkan pemutarnya.
+  plugin mpv yang bisa menjatuhkan pemutarnya. Artis dan judul dikirim dalam
+  bentuk bersih, supaya widget yang mencari lirik sendiri bisa menemukannya.
+- **Panel Radio** — daftar lagu yang akan diputar berikutnya saat radio menyala,
+  dengan penanda di bar kendali yang bisa diklik menuju daftar itu.
+- **Lagu disukai** (`l`) dan **rekomendasi** (`V`) yang disusun dari Mix YouTube
+  milik lagu-lagu itu.
+- **Dua bahasa** — Inggris sebagai bawaan, Indonesia lewat `g`.
 
 ## Kebutuhan
 
@@ -106,7 +112,7 @@ python3 test_musicbox.py
 ```
 
 Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 88 hal: semua handler keybind ada dan tidak melempar exception,
+Memeriksa 104 hal: semua handler keybind ada dan tidak melempar exception,
 perpindahan tab, antrean, album, panel aksi kontekstual, ekstraksi sampul,
 perintah yang dikirim radio, pendaftaran MPRIS, sel progres unduhan, penguraian
 lirik, dan pemulihan setelah mpv dibunuh di tengah lagu.
@@ -176,6 +182,19 @@ waktu untuk ditemukan:
   sekitar lima detik per judul — dua menit hanya untuk mengisi satu layar hasil.
   `view_count` gratis dari `--flat-playlist`, jadi tayangan masuk tabel dan suka
   diambil belakangan hanya untuk baris yang benar-benar disorot.
+- **Ukuran huruf milik terminal, bukan aplikasi.** foot tidak menyediakan
+  escape sequence untuk mengubahnya, jadi musicbox tidak mungkin melakukannya
+  dari dalam — pakai `Ctrl+plus`, `Ctrl+minus`, `Ctrl+0`, atau `Ctrl+scroll`.
+  Yang bisa diatur musicbox adalah kerapatan tampilan (`+` / `-`): tinggi
+  sampul, tinggi visualizer, dan padding.
+- **Rekomendasi tidak berpura-pura jadi algoritma.** Yang dipakai adalah daftar
+  Mix YouTube dari lagu-lagu yang disukai, dibuang yang sudah dimiliki, lalu
+  diurutkan menurut jumlah tayangan. Itu "yang menyukai ini biasanya juga
+  mendengar itu" versi YouTube — berguna, dan jujur soal asalnya.
+- **IPC mpv sekarang bisa bertanya, bukan cuma menyuruh.** Jawaban datang
+  bercampur dengan aliran event, jadi tiap permintaan dicocokkan lewat
+  `request_id`; tanpa itu yang terbaca bisa peristiwa lain yang kebetulan lewat
+  lebih dulu. Panel Radio membaca daftar putar mpv lewat jalur ini.
 - **`MUSICBOX_AO` memaksa keluaran audio.** Dipakai pengujian dengan nilai
   `null`. Tanpa itu suite berebut perangkat audio dengan musicbox yang sedang
   benar-benar dipakai mendengarkan musik, mpv gagal membuka stream

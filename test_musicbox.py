@@ -240,6 +240,56 @@ async def main():
         check("panel kosong memberi petunjuk", "Cari di YouTube" in petunjuk,
               petunjuk[:26].replace("\n", " "))
 
+        # Bahasa: Inggris bawaan, terjemahan bekerja, teks asing tetap terbaca.
+        mod.simpan_bahasa("en")
+        check("bahasa bawaan Inggris", mod._("Search") == "Search")
+        mod.simpan_bahasa("id")
+        check("terjemahan Indonesia bekerja", mod._("Queue") == "Antrean",
+              mod._("Queue"))
+        check("teks tanpa terjemahan tidak hilang",
+              mod._("Totally Untranslated") == "Totally Untranslated")
+        mod.simpan_bahasa("en")
+
+        # Lagu disukai: simpan, tolak duplikat, buang, pulih dari berkas.
+        app.liked = []
+        app.query_one("#tabs").active = "tab-lib"
+        await pilot.pause(0.3)
+        app.query_one("#library", DataTable).move_cursor(row=0)
+        await pilot.pause(0.2)
+        app.action_like()
+        await pilot.pause(0.3)
+        check("lagu bisa disukai", len(app.liked) == 1)
+        app.action_like()
+        await pilot.pause(0.2)
+        check("duplikat suka ditolak", len(app.liked) == 1)
+        app.save_liked()
+        app.liked = []
+        app.load_liked()
+        check("daftar suka pulih dari berkas", len(app.liked) == 1)
+
+        # Penanda radio: mati saat memutar biasa, menyala saat radio.
+        app.player.radio = False
+        app._sync_radio_button()
+        check("penanda radio mati saat bukan radio",
+              app.query_one("#btn-radio").has_class("off"))
+        app.player.radio = True
+        app._sync_radio_button()
+        check("penanda radio menyala saat radio",
+              app.query_one("#btn-radio").has_class("on"))
+        app.player.radio = False
+
+        # Kerapatan tampilan naik bertingkat dan berhenti di batas.
+        tinggi = []
+        for target in (0, 1, 2):
+            while app.zoom != target:
+                (app.action_zoom_in if app.zoom < target else app.action_zoom_out)()
+            await pilot.pause(0.2)
+            tinggi.append(app._tinggi_sampul())
+        check("kerapatan menaikkan tinggi sampul",
+              tinggi == sorted(tinggi) and tinggi[0] < tinggi[2], str(tinggi))
+        app.action_zoom_in()
+        check("kerapatan berhenti di batas atas", app.zoom == 2)
+
         # Radio harus meminta yt-dlp membuka daftar Mix. Tanpa yes-playlist mpv
         # cuma memuat lagu pertamanya dan radionya berhenti di situ. Diperiksa
         # dari perintah yang dikirim, bukan lewat jaringan, supaya tetap cepat

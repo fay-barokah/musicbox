@@ -95,8 +95,10 @@ class MpvPlayer:
         # sudah mati, jadi isinya dicatat di sini supaya bisa dipulihkan.
         self.playlist: list[str] = []
         self.loop = False
+        self.radio = False
         self.restarts = 0
         self._generation = 0
+        self._pending: dict[int, asyncio.Future] = {}
         self.state: dict = {
             "path": None, "title": None, "pause": True,
             "time-pos": 0.0, "duration": 0.0, "volume": 70.0,
@@ -232,6 +234,39 @@ class MpvPlayer:
         await self.set_volume_abs(vol)
         return True
 
+    async def request(self, command: list):
+        """Kirim perintah lalu tunggu jawabannya, dicocokkan lewat request_id.
+
+        Sampai sekarang musicbox hanya menyuruh mpv dan tidak pernah bertanya.
+        Membaca daftar putar butuh jawaban, dan jawaban itu datang bercampur
+        dengan aliran event — tanpa dicocokkan nomornya, yang terbaca bisa jadi
+        peristiwa lain yang kebetulan lewat lebih dulu.
+        """
+        if not self.writer:
+            return None
+        self._req_id += 1
+        rid = self._req_id
+        try:
+            fut = asyncio.get_running_loop().create_future()
+        except RuntimeError:
+            return None
+        self._pending[rid] = fut
+        await self._send({"command": command, "request_id": rid})
+        try:
+            return await asyncio.wait_for(fut, timeout=5)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            return None
+        finally:
+            self._pending.pop(rid, None)
+
+    async def playlist_entries(self) -> list[dict]:
+        """Isi daftar putar mpv sekarang, termasuk yang dibuka dari Mix."""
+        data = await self.request(["get_property", "playlist"])
+        return data if isinstance(data, list) else []
+
+    async def play_index(self, idx: int) -> None:
+        await self._send({"command": ["set_property", "playlist-pos", idx]})
+
     async def _send(self, payload: dict) -> None:
         if not self.writer:
             return
@@ -256,6 +291,12 @@ class MpvPlayer:
                 msg = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            rid = msg.get("request_id")
+            if rid is not None and rid in self._pending:
+                fut = self._pending.get(rid)
+                if fut is not None and not fut.done():
+                    fut.set_result(msg.get("data"))
+                continue
             if msg.get("event") == "property-change":
                 name, data = msg.get("name"), msg.get("data")
                 if name == "media-title":
@@ -269,6 +310,7 @@ class MpvPlayer:
 
     async def play(self, target: str) -> None:
         self.playlist = [target]
+        self.radio = False
         await self._send({"command": ["loadfile", target, "replace"]})
         await self._send({"command": ["set_property", "pause", False]})
 
@@ -296,6 +338,7 @@ class MpvPlayer:
         biasa yang kebetulan membawa `list=` tidak ikut berubah perilakunya.
         """
         self.playlist = [target]
+        self.radio = True
         await self._send({"command": ["loadfile", target, "replace", -1,
                                       {"ytdl-raw-options": "yes-playlist="}]})
         await self._send({"command": ["set_property", "pause", False]})
@@ -836,6 +879,59 @@ def yt_search(query: str, limit: int = 20) -> list[dict]:
     return results
 
 
+def rekomendasi_dari(benih: list[dict], sudah_punya: set[str],
+                     per_benih: int = 12) -> list[dict]:
+    """Kumpulkan calon lagu dari Mix YouTube milik lagu-lagu yang disukai.
+
+    Bukan algoritma rekomendasi sungguhan, dan tidak berpura-pura begitu:
+    daftar Mix adalah "yang menyukai ini biasanya juga mendengar itu" versi
+    YouTube. Yang sudah ada di library atau di daftar suka dibuang supaya
+    hasilnya benar-benar berisi hal baru.
+    """
+    tab = "\t"
+    fmt = tab.join(("%(id)s", "%(duration>%H:%M:%S)s", "%(uploader).24s",
+                    "%(view_count)s", "%(title).80s"))
+    keluar: list[dict] = []
+    terlihat: set[str] = set()
+    for lagu in benih:
+        target = str(lagu.get("target", ""))
+        vid = ""
+        for bagian in target.split("?", 1)[-1].split("&"):
+            if bagian.startswith("v="):
+                vid = bagian[2:]
+                break
+        if not vid:
+            continue
+        try:
+            out = subprocess.run(
+                ["yt-dlp", "--skip-download", "--no-warnings", "--flat-playlist",
+                 "--playlist-end", str(per_benih), "--print", fmt,
+                 yt_radio_url(vid)],
+                capture_output=True, text=True, timeout=120).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        for baris in out.splitlines():
+            bagian = baris.split(tab)
+            if len(bagian) != 5:
+                continue
+            if bagian[0] == vid or bagian[0] in terlihat:
+                continue
+            if bagian[4].strip().lower() in sudah_punya:
+                continue
+            terlihat.add(bagian[0])
+            keluar.append({"id": bagian[0], "duration": bagian[1],
+                           "uploader": bagian[2], "views": bagian[3],
+                           "title": bagian[4]})
+    # Yang paling banyak ditonton lebih dulu: dari daftar rekomendasi, itu
+    # tebakan paling aman untuk lagu yang belum pernah didengar.
+    def kunci(r):
+        try:
+            return -float(r["views"])
+        except ValueError:
+            return 0.0
+    return sorted(keluar, key=kunci)
+
+
 def yt_likes(video_id: str) -> tuple[str, str]:
     """Ambil jumlah suka satu video. Lambat — panggil hanya saat dibutuhkan."""
     try:
@@ -955,10 +1051,80 @@ def yt_radio_url(video_id: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
 
 
+# ----------------------------------------------------------------- bahasa
+
+
+LANG_FILE = STATE_DIR / "lang.txt"
+
+# Bahasa disimpan sebagai tabel Inggris -> lokal, bukan sebaliknya. Kunci dalam
+# bahasa Inggris membuat teks yang belum diterjemahkan tetap terbaca masuk akal
+# alih-alih muncul sebagai kode kosong.
+TERJEMAHAN = {
+    "id": {
+        "Library": "Library", "Search": "Cari", "Queue": "Antrean",
+        "Albums": "Album", "Liked": "Suka", "Radio": "Radio",
+        "Downloads": "Unduhan",
+        "Title": "Judul", "Artist": "Artis", "Duration": "Durasi",
+        "Channel": "Kanal", "Views": "Ditonton", "Source": "Sumber",
+        "Format": "Format", "Progress": "Progres", "Time": "Waktu",
+        "play": "putar", "queue": "antrean", "album": "album",
+        "download": "unduh", "radio": "radio", "lyrics": "lirik",
+        "delete file": "hapus file", "remove from album": "keluarkan dari album",
+        "delete album": "hapus album", "remove": "keluarkan",
+        "play queue": "putar antrean", "jump to this song": "lompat ke lagu ini",
+        "recommend from this": "rekomendasi dari ini",
+        "radio from this": "radio dari ini", "unlike": "buang dari suka",
+        "new album": "album baru",
+        "searching": "mencari", "no results": "tidak ada hasil",
+        "results for": "hasil untuk",
+        "type above then press Enter": "ketik di atas lalu tekan Enter",
+        "load more": "muat lebih banyak", "sort": "urutkan",
+        "nothing playing": "belum ada yang diputar",
+        "done": "selesai", "failed": "gagal", "running": "berjalan",
+        "left": "sisa",
+        "songs": "lagu", "liked songs": "lagu disukai",
+        "Play/Pause": "Play/Pause", "Next": "Berikut", "Previous": "Sebelum",
+        "Stop": "Stop", "Autoplay": "Autoplay", "Visualizer": "Visualizer",
+        "Quit": "Keluar", "Shuffle": "Acak", "Lyrics": "Lirik",
+        "Like": "Suka", "Back": "Kembali", "Zoom in": "Perbesar",
+        "Zoom out": "Perkecil",
+    },
+}
+_BAHASA = "en"
+
+
+def muat_bahasa() -> str:
+    global _BAHASA
+    try:
+        pilihan = LANG_FILE.read_text().strip()
+    except OSError:
+        pilihan = ""
+    _BAHASA = pilihan if pilihan in ("en", "id") else "en"
+    return _BAHASA
+
+
+def simpan_bahasa(kode: str) -> None:
+    global _BAHASA
+    _BAHASA = kode if kode in ("en", "id") else "en"
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        LANG_FILE.write_text(_BAHASA)
+    except OSError:
+        pass
+
+
+def _(teks: str) -> str:
+    """Terjemahkan teks antarmuka. Bahasa Inggris dipakai apa adanya."""
+    if _BAHASA == "en":
+        return teks
+    return TERJEMAHAN.get(_BAHASA, {}).get(teks, teks)
+
+
 # ------------------------------------------------------------------- lirik
 
 
 LYRICS_CACHE = STATE_DIR / "lyrics"
+LIKED_FILE = STATE_DIR / "liked.json"
 # Embel-embel judul YouTube yang menyesatkan pencarian lirik: "(1 Hour)",
 # "[slowed + reverb]", "| Best part looped", dan sejenisnya.
 _SAMPAH_JUDUL = re.compile(
@@ -1345,6 +1511,11 @@ class NowPlaying(Static):
             # kondisi hidup/mati terbaca tanpa harus menebak dari warna.
             yield TransportButton("↻ auto", "autoplay", id="btn-auto", classes="tbtn wide on")
             yield TransportButton("◫ cava", "cava", id="btn-cava", classes="tbtn wide on")
+            # Penanda mode radio: mati saat memutar biasa, menyala dan bisa
+            # diklik saat radio jalan — kliknya membuka daftar lagu berikutnya.
+            yield TransportButton("📻 " + _("radio"), "radio_panel", id="btn-radio",
+                                  classes="tbtn wide off")
+            yield TransportButton("♪ lirik", "player", classes="tbtn wide")
             yield Static("🕪", id="vol-label")
             yield VolumeBar(id="vol-bar")
         with Horizontal(id="np-row"):
@@ -1451,9 +1622,9 @@ class PlayerScreen(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "close", "Kembali"),
         Binding("q", "close", "Kembali"),
-        Binding("space", "playpause", "Play/Pause"),
-        Binding("n", "next", "Berikut"),
-        Binding("p", "prev", "Sebelum"),
+        Binding("space", "playpause", _("Play/Pause")),
+        Binding("n", "next", _("Next")),
+        Binding("p", "prev", _("Previous")),
         Binding("left", "mundur", "-5s"),
         Binding("right", "maju", "+5s"),
     ]
@@ -1642,6 +1813,14 @@ class MusicBox(App):
     /* Tinggi sampul dipatok supaya teks di bawahnya tidak melompat-lompat
        saat berpindah antar lagu dengan rasio gambar berbeda. */
     #cover { height: 14; width: 1fr; background: transparent; }
+    /* Kerapatan tampilan: padat / normal / lapang. Ini BUKAN ukuran huruf —
+       itu milik terminal (foot: Ctrl+plus / Ctrl+minus / Ctrl+0). */
+    MusicBox.zoom-0 #cover { height: 9; }
+    MusicBox.zoom-0 CavaBars { height: 4; }
+    MusicBox.zoom-0 #info { padding: 0 1; }
+    MusicBox.zoom-2 #cover { height: 18; }
+    MusicBox.zoom-2 CavaBars { height: 9; }
+    MusicBox.zoom-2 #info { padding: 1 3; }
     /* Sampul mengecil saat panel pendek — misalnya ketika visualizer menyala.
        Yang harus mengalah adalah gambarnya, bukan tombol aksinya. */
     #info.sempit #cover { height: 8; }
@@ -1677,6 +1856,7 @@ class MusicBox(App):
     }
     #yt-input:focus { border: round $cae-primary; }
     #hasil-status { height: auto; padding: 0 1; color: $cae-on-variant; }
+    #radio-status { height: auto; padding: 0 1; color: $cae-on-variant; }
 
     /* Digayakan lewat tipe widget, BUKAN per-id. Menyebut #library dan
        #results satu per satu membuat setiap tabel baru (mis. Unduhan) jatuh
@@ -1733,18 +1913,29 @@ class MusicBox(App):
     #player-waktu { height: 1; color: $cae-on-variant; padding: 0 0 0 3; }
     #player-bantuan { height: 1; color: $cae-on-variant; padding: 0 0 0 3; }
 
-    #np-controls { height: 1; align-horizontal: center; }
+    #np-controls { align-horizontal: center; }
+    /* Tombol diberi kotak supaya terbaca sebagai tombol, bukan tulisan yang
+       kebetulan bisa diklik. Tingginya 3 karena bingkainya memakan satu baris
+       di atas dan satu di bawah. */
+    #np-controls { height: 3; }
     .tbtn {
-        width: 5;
+        width: 7;
+        height: 3;
         content-align: center middle;
         color: $cae-on-variant;
         background: transparent;
+        border: round $cae-outline;
     }
-    .tbtn.wide { width: 9; }
-    .tbtn:hover { color: $cae-primary; text-style: bold; }
+    .tbtn.wide { width: 11; }
+    .tbtn:hover {
+        color: $cae-primary;
+        text-style: bold;
+        border: round $cae-primary;
+        background: $cae-container;
+    }
     /* Tombol status: menyala saat aktif, redup saat mati. */
-    .tbtn.on { color: $cae-primary; text-style: bold; }
-    .tbtn.off { color: $cae-outline; }
+    .tbtn.on { color: $cae-primary; text-style: bold; border: round $cae-primary; }
+    .tbtn.off { color: $cae-outline; border: round $cae-outline; }
 
     #vol-label { width: 5; color: $cae-on-variant; content-align: right middle; }
     #vol-bar { width: 14; color: $cae-primary; background: transparent; margin: 0 1; }
@@ -1780,35 +1971,41 @@ class MusicBox(App):
     """
 
     BINDINGS = [
-        Binding("space", "toggle_pause", "Play/Pause"),
-        Binding("n", "next", "Berikut"),
-        Binding("p", "prev", "Sebelum"),
-        Binding("s", "stop", "Stop"),
+        Binding("space", "toggle_pause", _("Play/Pause")),
+        Binding("n", "next", _("Next")),
+        Binding("p", "prev", _("Previous")),
+        Binding("s", "stop", _("Stop")),
         Binding("right", "seek_fwd", "+5s", show=False),
         Binding("left", "seek_back", "-5s", show=False),
         Binding("plus,equals_sign", "vol_up", "Vol+", show=False),
         Binding("minus", "vol_down", "Vol-", show=False),
-        Binding("z", "shuffle", "Acak"),
-        Binding("a", "toggle_autoplay", "Autoplay"),
-        Binding("c", "toggle_cava", "Visualizer"),
+        Binding("z", "shuffle", _("Shuffle")),
+        Binding("a", "toggle_autoplay", _("Autoplay")),
+        Binding("c", "toggle_cava", _("Visualizer")),
         Binding("d", "download", show=False, description="Unduh"),
         Binding("f", "toggle_format", show=False, description="mp3/opus"),
         Binding("R", "radio", show=False, description="Radio"),
         Binding("m", "more_results", show=False, description="Muat lagi"),
         Binding("o", "sort_results", show=False, description="Urutkan"),
-        Binding("L", "player", "Lirik"),
+        Binding("L", "player", _("Lyrics")),
+        Binding("l", "like", _("Like")),
+        Binding("u", "unlike", show=False, description="Buang suka"),
+        Binding("V", "rekomendasi", show=False, description="Rekomendasi"),
+        Binding("g", "bahasa", show=False, description="Language"),
+        Binding("plus", "zoom_in", show=False, description="Zoom in"),
+        Binding("minus", "zoom_out", show=False, description="Zoom out"),
         Binding("x", "delete_track", show=False, description="Hapus"),
         Binding("e", "enqueue", show=False, description="+Antrean"),
         Binding("E", "dequeue", "−Antrean", show=False),
         Binding("ctrl+up", "queue_up", "Naik", show=False),
         Binding("ctrl+down", "queue_down", "Turun", show=False),
         Binding("P", "play_queue", show=False, description="Putar antrean"),
-        Binding("S", "new_playlist", "Album baru"),
+        Binding("S", "new_playlist", _("new album")),
         Binding("A", "add_to_playlist", show=False, description="+ke album"),
         Binding("X", "delete_playlist", "Hapus album", show=False),
         Binding("D", "remove_from_album", "Hapus dari album", show=False),
         Binding("r", "rescan", "Pindai ulang"),
-        Binding("q", "quit", "Keluar"),
+        Binding("q", "quit", _("Quit")),
     ]
 
     def __init__(self) -> None:
@@ -1824,6 +2021,9 @@ class MusicBox(App):
         self._mencari = False
         self.sort_views = False
         self._lyr_mark: dict[str, bool] = {}
+        self.radio_list: list[dict] = []
+        self.liked: list[dict] = []
+        self.zoom = 1
         self.mpris: MprisService | None = None
         self.results: list[dict] = []
         self.dl_format = "mp3"
@@ -1878,9 +2078,9 @@ class MusicBox(App):
         with Vertical():
             with Horizontal(id="main"):
                 with TabbedContent(id="tabs"):
-                    with TabPane("Library", id="tab-lib"):
+                    with TabPane(_("Library"), id="tab-lib"):
                         yield DataTable(id="library", cursor_type="row", zebra_stripes=False)
-                    with TabPane("Cari", id="tab-yt"):
+                    with TabPane(_("Search"), id="tab-yt"):
                         yield Input(placeholder="cari di YouTube lalu tekan Enter…",
                                     id="yt-input")
                         # Status pencarian ditulis di sini, bukan sebagai toast
@@ -1888,12 +2088,20 @@ class MusicBox(App):
                         # pengguna sedang menatap area hasil, bukan pojok layar.
                         yield Static(id="hasil-status")
                         yield DataTable(id="results", cursor_type="row", zebra_stripes=False)
-                    with TabPane("Antrean", id="tab-queue"):
+                    with TabPane(_("Queue"), id="tab-queue"):
                         yield DataTable(id="queue", cursor_type="row",
                                         zebra_stripes=False)
-                    with TabPane("Album", id="tab-pl"):
+                    with TabPane(_("Albums"), id="tab-pl"):
                         yield Tree("album", id="pltree")  # auto_expand dimatikan di on_mount
-                    with TabPane("Unduhan", id="tab-dl"):
+                    with TabPane(_("Liked"), id="tab-liked"):
+                        yield Static(id="liked-status")
+                        yield DataTable(id="liked", cursor_type="row",
+                                        zebra_stripes=False)
+                    with TabPane(_("Radio"), id="tab-radio"):
+                        yield Static(id="radio-status")
+                        yield DataTable(id="radio", cursor_type="row",
+                                        zebra_stripes=False)
+                    with TabPane(_("Downloads"), id="tab-dl"):
                         yield DataTable(id="downloads", cursor_type="row",
                                         zebra_stripes=False)
                 with Vertical(id="info"):
@@ -1909,18 +2117,21 @@ class MusicBox(App):
 
     async def on_mount(self) -> None:
         table = self.query_one("#library", DataTable)
-        table.add_columns("Judul", "Artis", "Durasi")
+        table.add_columns(_("Title"), _("Artist"), _("Duration"))
         self.query_one("#results", DataTable).add_columns(
-            "Judul", "Kanal", "Durasi", "Ditonton")
+            _("Title"), _("Channel"), _("Duration"), _("Views"))
         self.query_one("#downloads", DataTable).add_columns(
-            "Judul", "Format", "Progres", "Waktu")
-        self.query_one("#queue", DataTable).add_columns("#", "Judul", "Sumber")
+            _("Title"), _("Format"), _("Progress"), _("Time"))
+        self.query_one("#radio", DataTable).add_columns("#", _("Title"))
+        self.query_one("#liked", DataTable).add_columns(_("Title"), _("Source"))
+        self.query_one("#queue", DataTable).add_columns("#", _("Title"), _("Source"))
         # Enter pada node album jangan ikut melipatnya: album yang menutup
         # membuat pemutaran terlihat seperti tidak terjadi apa-apa.
         self.query_one("#pltree", Tree).auto_expand = False
         self.load_downloads()
         self.load_queue()
         self.load_playlists()
+        self.load_liked()
         self.load_library()
         self._status_hasil("ketik di atas lalu Enter  ·  "
                            "m muat lebih banyak  ·  o urutkan")
@@ -1952,6 +2163,185 @@ class MusicBox(App):
     def _schedule_refresh(self) -> None:
         # Dipanggil dari task pembaca IPC; jadwalkan di loop UI.
         self.call_later(self.refresh_now_playing)
+
+    def action_bahasa(self) -> None:
+        """Ganti bahasa antarmuka. Inggris jadi bawaan supaya bisa dipakai siapa saja."""
+        global _BAHASA
+        baru = "id" if _BAHASA == "en" else "en"
+        simpan_bahasa(baru)
+        self.notify("Language: English — restart musicbox to apply everywhere"
+                    if baru == "en" else
+                    "Bahasa: Indonesia — buka ulang musicbox agar menyeluruh",
+                    timeout=6)
+        self.refresh_liked_table()
+        self.load_library()
+
+    def action_zoom_in(self) -> None:
+        self._zoom(1)
+
+    def action_zoom_out(self) -> None:
+        self._zoom(-1)
+
+    def _zoom(self, arah: int) -> None:
+        """Perbesar/perkecil kerapatan tampilan.
+
+        Ukuran huruf sesungguhnya milik terminal, bukan aplikasi: foot tidak
+        menyediakan escape sequence untuk mengubahnya, jadi musicbox tidak
+        mungkin melakukannya dari dalam. Yang bisa diatur adalah kerapatan —
+        tinggi sampul, jumlah batang visualizer, dan padding — yang membuat
+        tampilan terasa lebih lapang atau lebih padat.
+
+        Untuk huruf yang benar-benar membesar, foot sudah menyediakannya:
+        Ctrl+plus, Ctrl+minus, Ctrl+0, dan Ctrl+scroll.
+        """
+        self.zoom = max(0, min(2, self.zoom + arah))
+        nama = ("padat", "normal", "lapang")[self.zoom]
+        for i in range(3):
+            self.set_class(i == self.zoom, f"zoom-{i}")
+        self._fit_info_panel()
+        self.notify(f"tampilan: {nama}  ·  "
+                    "Ctrl+plus / Ctrl+minus mengubah ukuran huruf terminal",
+                    timeout=6)
+
+    # -- lagu disukai ------------------------------------------------------
+
+    def load_liked(self) -> None:
+        try:
+            self.liked = json.loads(LIKED_FILE.read_text())
+        except (OSError, json.JSONDecodeError):
+            self.liked = []
+        self.refresh_liked_table()
+
+    def save_liked(self) -> None:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            LIKED_FILE.write_text(json.dumps(self.liked, indent=1))
+        except OSError:
+            pass
+
+    def refresh_liked_table(self) -> None:
+        try:
+            tabel = self.query_one("#liked", DataTable)
+            status = self.query_one("#liked-status", Static)
+        except Exception:
+            return
+        tabel.clear()
+        for lagu in self.liked:
+            tabel.add_row(lagu.get("title", "?"), lagu.get("source", "—"))
+        status.update(f"{len(self.liked)} lagu disukai  ·  "
+                      "[dim]l menyukai · u membuang · V rekomendasi[/dim]"
+                      if self.liked else
+                      "[dim]tekan l pada lagu mana pun untuk menyukainya[/dim]")
+
+    def action_like(self) -> None:
+        """Sukai lagu yang disorot, atau yang sedang berbunyi."""
+        lagu = self._selected_song()
+        if not lagu:
+            st = self.player.state
+            if st.get("path"):
+                info = self.now_playing_info()
+                lagu = {"title": info.get("title") or st.get("title") or "?",
+                        "target": st["path"],
+                        "source": "youtube" if str(st["path"]).startswith("http")
+                                  else "lokal"}
+        if not lagu:
+            self.notify("sorot lagu dulu", timeout=3)
+            return
+        if any(x.get("target") == lagu.get("target") for x in self.liked):
+            self.notify("sudah ada di daftar suka", timeout=2)
+            return
+        self.liked.insert(0, {"title": lagu.get("title", "?"),
+                              "target": lagu.get("target", ""),
+                              "source": lagu.get("source", "lokal")})
+        self.save_liked()
+        self.refresh_liked_table()
+        self.notify(f"♥ disukai ({len(self.liked)})", timeout=2)
+
+    def action_unlike(self) -> None:
+        try:
+            idx = self.query_one("#liked", DataTable).cursor_row
+        except Exception:
+            return
+        if 0 <= idx < len(self.liked):
+            hilang = self.liked.pop(idx)
+            self.save_liked()
+            self.refresh_liked_table()
+            self.notify(f"dibuang: {hilang.get('title', '?')[:28]}", timeout=3)
+
+    def action_rekomendasi(self) -> None:
+        """Susun rekomendasi dari lagu-lagu yang disukai.
+
+        Ini bukan algoritma sungguhan dan tidak berpura-pura begitu: yang
+        dipakai adalah daftar Mix YouTube dari lagu-lagu yang disukai, lalu
+        dibuang yang sudah ada di library maupun di daftar suka. Hasilnya
+        "orang yang menyukai ini biasanya juga mendengar itu" — cukup berguna,
+        dan jujur tentang dari mana asalnya.
+        """
+        if not self.liked:
+            self.notify("sukai beberapa lagu dulu", timeout=4)
+            return
+        benih = [x for x in self.liked if str(x.get("target", "")).startswith("http")]
+        if not benih:
+            self.notify("rekomendasi butuh lagu dari YouTube", timeout=4)
+            return
+        acak = random.sample(benih, min(3, len(benih)))
+        punya = {Path(t["path"]).stem.lower() for t in self.library.tracks}
+        punya |= {x.get("title", "").lower() for x in self.liked}
+        self._query = "rekomendasi dari lagu yang kamu sukai"
+        self._mencari = True
+        self._status_hasil("menyusun rekomendasi dari "
+                           f"{len(acak)} lagu yang kamu sukai…")
+        self.query_one("#tabs").active = "tab-yt"
+        self.run_worker(lambda: rekomendasi_dari(acak, punya), thread=True,
+                        name="ytsearch", group="yt", exit_on_error=False)
+
+    async def action_radio_panel(self) -> None:
+        """Buka daftar lagu yang akan diputar radio berikutnya."""
+        self.query_one("#tabs").active = "tab-radio"
+        await self.refresh_radio()
+
+    async def refresh_radio(self) -> None:
+        """Baca daftar putar mpv dan tampilkan yang belum diputar.
+
+        Daftar Mix berisi ratusan judul; yang berguna adalah yang masih di
+        depan. Yang sudah lewat cuma menambah gulungan tanpa memberi tahu apa
+        pun soal apa yang akan terdengar berikutnya.
+        """
+        try:
+            tabel = self.query_one("#radio", DataTable)
+            status = self.query_one("#radio-status", Static)
+        except Exception:
+            return
+        if not self.player.radio:
+            tabel.clear()
+            status.update("[b]Radio belum menyala[/b]\n\n"
+                          "[dim]pilih lagu di tab Cari lalu tekan R.\n"
+                          "radio menyambung sendiri ke rekomendasi\n"
+                          "berdasarkan lagu itu.[/dim]")
+            return
+        status.update("memuat daftar radio…")
+        entri = await self.player.playlist_entries()
+        self.radio_list = entri
+        tabel.clear()
+        sekarang = next((i for i, e in enumerate(entri) if e.get("current")), 0)
+        for i, e in enumerate(entri):
+            judul = e.get("title") or Path(str(e.get("filename", "?"))).name
+            tanda = "▶ " if i == sekarang else ("  " if i > sekarang else "· ")
+            tabel.add_row(str(i + 1), tanda + str(judul))
+        status.update(f"[b]Radio[/b] · {len(entri)} lagu · "
+                      f"sekarang di nomor {sekarang + 1}"
+                      "  [dim]enter untuk melompat ke lagu[/dim]")
+        if entri:
+            tabel.move_cursor(row=min(sekarang, len(entri) - 1))
+
+    def _sync_radio_button(self) -> None:
+        try:
+            btn = self.query_one("#btn-radio", TransportButton)
+        except Exception:
+            return
+        aktif = bool(self.player.radio)
+        btn.set_class(aktif, "on")
+        btn.set_class(not aktif, "off")
 
     def action_player(self) -> None:
         """Buka halaman pemutar penuh dengan lirik."""
@@ -2144,6 +2534,7 @@ class MusicBox(App):
             self._mark_now_playing(path)
             self._np_cache = {}
             self._tandai_lirik()
+            self._sync_radio_button()
         title = st.get("title") or "tidak ada yang diputar"
         if st.get("pause") and st.get("path"):
             title = f"⏸  {title}"
@@ -2285,7 +2676,8 @@ class MusicBox(App):
     # yang sedang dibuka.
     TAB_TABLE = {"tab-lib": "library", "tab-yt": "results",
                  "tab-queue": "queue", "tab-dl": "downloads",
-                 "tab-pl": "album"}
+                 "tab-pl": "album", "tab-radio": "radio",
+                 "tab-liked": "liked"}
 
     # Aksi yang hanya masuk akal di tab tertentu. Selain yang terdaftar di
     # sini, aksi dianggap global (kendali pemutaran, keluar, dan sejenisnya).
@@ -2299,6 +2691,9 @@ class MusicBox(App):
         "tab-pl":    {"new_playlist", "delete_playlist", "remove_from_album",
                       "add_to_playlist"},
         "tab-dl":    set(),
+        "tab-radio": {"radio_panel", "enqueue", "add_to_playlist"},
+        "tab-liked": {"unlike", "enqueue", "add_to_playlist", "rekomendasi",
+                      "radio"},
     }
     CONTEXTUAL = set().union(*TAB_ACTIONS.values())
 
@@ -2376,11 +2771,16 @@ class MusicBox(App):
         self.update_info(table_id, table.cursor_row)
 
     def _tinggi_sampul(self) -> int:
-        """Tinggi sampul dalam baris, mengikuti kelas sempit di panel info."""
+        """Tinggi sampul dalam baris, mengikuti kerapatan dan ruang tersisa."""
+        dasar = (9, 14, 18)[self.zoom]
         try:
-            return 8 if self.query_one("#info").has_class("sempit") else 14
+            sempit = self.query_one("#info").has_class("sempit")
         except Exception:
-            return 14
+            return dasar
+        # Panel sempit MEMPERKECIL, tidak pernah memperbesar. Mematoknya ke
+        # angka tetap membuat mode padat justru mendapat sampul lebih tinggi
+        # daripada yang dimintanya.
+        return min(dasar, 8) if sempit else dasar
 
     def show_cover(self, image_path: Path | None) -> None:
         """Tampilkan sampul di panel kanan.
@@ -2429,20 +2829,28 @@ class MusicBox(App):
     # di footer, supaya jelas mana yang bekerja pada LAGU dan mana yang pada
     # PEMUTARAN.
     SONG_ACTIONS = {
-        "library":   [("▶  putar", "play_selected"), ("＋ antrean", "enqueue"),
-                      ("♪  album", "add_to_playlist"), ("✕  hapus file", "delete_track")],
-        "results":   [("▶  putar", "play_selected"), ("📻 radio", "radio"),
-                      ("＋ antrean", "enqueue"), ("♪  album", "add_to_playlist"),
+        "library":   [("▶  " + _("play"), "play_selected"), ("＋ " + _("queue"), "enqueue"),
+                      ("♪  " + _("album"), "add_to_playlist"), ("✕  " + _("delete file"), "delete_track")],
+        "results":   [("▶  " + _("play"), "play_selected"), ("📻 " + _("radio"), "radio"),
+                      ("＋ " + _("queue"), "enqueue"), ("♪  " + _("album"), "add_to_playlist"),
                       ("⬇  unduh", "download")],
-        "queue":     [("▶  putar antrean", "play_queue"), ("♪  album", "add_to_playlist"),
-                      ("✕  keluarkan", "dequeue")],
+        "queue":     [("▶  " + _("play queue"), "play_queue"), ("♪  " + _("album"), "add_to_playlist"),
+                      ("✕  " + _("remove"), "dequeue")],
         # Tab Album memakai Tree, bukan DataTable. Tanpa entri sendiri di sini
         # panel kanan membeku menampilkan aksi tab sebelumnya, dan aksi
         # "keluarkan dari album" tidak pernah muncul sama sekali.
-        "album":     [("▶  putar", "play_selected"),
-                      ("✕  keluarkan dari album", "remove_from_album"),
-                      ("🗑  hapus album", "delete_playlist")],
+        "album":     [("▶  " + _("play"), "play_selected"),
+                      ("✕  " + _("remove from album"), "remove_from_album"),
+                      ("🗑  " + _("delete album"), "delete_playlist")],
         "downloads": [],
+        "liked": [("▶  " + _("play"), "play_selected"),
+                  ("✨ " + _("recommend from this"), "rekomendasi"),
+                  ("📻 " + _("radio from this"), "radio"),
+                  ("＋ " + _("queue"), "enqueue"),
+                  ("♡  " + _("unlike"), "unlike")],
+        "radio": [("▶  " + _("jump to this song"), "play_selected"),
+                  ("＋ " + _("queue"), "enqueue"),
+                  ("♪  " + _("album"), "add_to_playlist")],
     }
 
     def rebuild_song_actions(self, table_id: str | None) -> None:
@@ -2512,6 +2920,14 @@ class MusicBox(App):
                     "[dim]unduh lagu dari tab Cari dengan d,\n"
                     "atau taruh berkas di ~/Music lalu\n"
                     "tekan r untuk memindai ulang.[/dim]"),
+        "liked": ("[b]Belum ada lagu disukai[/b]\n\n"
+                  "[dim]tekan l pada lagu mana pun untuk\n"
+                  "menyukainya. dari daftar ini musicbox\n"
+                  "bisa menyusun rekomendasi.[/dim]"),
+        "radio": ("[b]Radio belum menyala[/b]\n\n"
+                  "[dim]pilih lagu di tab Cari lalu tekan R.\n"
+                  "radio menyambung sendiri ke rekomendasi\n"
+                  "berdasarkan lagu itu.[/dim]"),
         "downloads": ("[b]Belum ada unduhan[/b]\n\n"
                       "[dim]pilih lagu di tab Cari lalu tekan d.\n"
                       "f mengganti format mp3 / opus.[/dim]"),
@@ -2595,6 +3011,23 @@ class MusicBox(App):
                 lines += [f"artis    {lagu['artist'] or '—'}",
                           f"durasi   {fmt_time(lagu['duration'])}"]
             lines += ["", f"[dim]{Path(target).name if lokal else target}[/dim]"]
+        elif table_id == "liked" and 0 <= idx < len(self.liked):
+            lagu = self.liked[idx]
+            self._show_cover_for(lagu.get("target"))
+            lines = [f"[b]{lagu.get('title', '?')}[/b]", "",
+                     f"sumber   {lagu.get('source', '—')}",
+                     f"urutan   {idx + 1} dari {len(self.liked)}",
+                     "", f"[dim]{lagu.get('target', '')}[/dim]",
+                     "", "[dim]V rekomendasi · R radio · u buang[/dim]"]
+        elif table_id == "radio" and 0 <= idx < len(self.radio_list):
+            e = self.radio_list[idx]
+            judul = e.get("title") or Path(str(e.get("filename", "?"))).name
+            self._show_cover_for(e.get("filename"))
+            lines = [f"[b]{judul}[/b]", "",
+                     f"urutan   {idx + 1} dari {len(self.radio_list)}",
+                     "sumber   radio YouTube",
+                     "", f"[dim]{e.get('filename', '')}[/dim]",
+                     "", "[dim]enter melompat ke lagu ini[/dim]"]
         elif table_id == "downloads" and 0 <= idx < len(self.downloads):
             d = self.downloads[idx]
             self._show_cover_for(d.get("url"))
@@ -2784,6 +3217,18 @@ class MusicBox(App):
             idx = self.query_one("#queue", DataTable).cursor_row
             if 0 <= idx < len(self.queue):
                 return dict(self.queue[idx])
+        elif active == "liked":
+            idx = self.query_one("#liked", DataTable).cursor_row
+            if 0 <= idx < len(self.liked):
+                return dict(self.liked[idx])
+        elif active == "radio":
+            idx = self.query_one("#radio", DataTable).cursor_row
+            if 0 <= idx < len(self.radio_list):
+                e = self.radio_list[idx]
+                return {"title": e.get("title")
+                                 or Path(str(e.get("filename", "?"))).name,
+                        "target": str(e.get("filename", "")),
+                        "source": "radio"}
         elif active == "album":
             # Sumbernya Tree, jadi lagu diambil dari node yang disorot.
             node = self.query_one("#pltree", Tree).cursor_node
@@ -3029,6 +3474,14 @@ class MusicBox(App):
     # -- pemutaran ---------------------------------------------------------
 
     async def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.data_table.id == "radio":
+            idx = event.cursor_row
+            if 0 <= idx < len(self.radio_list):
+                await self.player.play_index(idx)
+                self.notify(f"lompat ke lagu {idx + 1}", timeout=2)
+                self.call_after_refresh(
+                    lambda: self.run_worker(self.refresh_radio(), exclusive=False))
+            return
         if event.data_table.id == "results":
             r = self._selected_result()
             if r:
@@ -3245,6 +3698,7 @@ def already_running() -> int | None:
 
 
 def main() -> int:
+    muat_bahasa()
     if shutil.which("mpv") is None:
         print("mpv belum terpasang", flush=True)
         return 1
