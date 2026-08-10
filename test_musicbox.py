@@ -5,10 +5,12 @@ from pathlib import Path
 tmp = tempfile.mkdtemp(prefix="mbtest-")
 os.environ["XDG_RUNTIME_DIR"] = tmp
 
-src = Path.home().joinpath(".local/bin/musicbox").read_text().replace(
-    "raise SystemExit(main())", "pass")
+# Uji salinan di repo ini, bukan yang terpasang di ~/.local/bin, supaya hasilnya
+# mencerminkan kode yang benar-benar ada di sini.
+SRC = Path(__file__).parent / "bin" / "musicbox"
+src = SRC.read_text().replace("raise SystemExit(main())", "pass")
 mod = type(sys)("mb")
-exec(compile(src, "musicbox", "exec"), mod.__dict__)
+exec(compile(src, str(SRC), "exec"), mod.__dict__)
 mod.STATE_DIR = Path(tmp) / "state"
 mod.QUEUE_FILE = mod.STATE_DIR / "queue.json"
 mod.PLAYLIST_DIR = mod.STATE_DIR / "playlists"
