@@ -32,6 +32,7 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
 - **Sampul sungguhan** lewat sixel, bukan blok ASCII.
 - **MPRIS**, sehingga tampil di widget media desktop dan bisa dikendalikan dari
   sana.
+- **Penanda lagu aktif** di daftar library, antrean, dan album.
 - **Lanjut dari terakhir** — lagu dan posisi dipulihkan saat dibuka lagi.
 
 ## Kebutuhan
@@ -90,7 +91,7 @@ python3 test_musicbox.py
 ```
 
 Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 65 hal: semua handler keybind ada dan tidak melempar exception,
+Memeriksa 68 hal: semua handler keybind ada dan tidak melempar exception,
 perpindahan tab, antrean, album, panel aksi kontekstual, dan ekstraksi sampul.
 
 ## Catatan teknis

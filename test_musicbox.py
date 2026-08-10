@@ -100,6 +100,30 @@ async def main():
         from textual.widgets import Tree as T0
         check("auto_expand mati", app.query_one("#pltree", T0).auto_expand is False)
 
+        # Memutar daun album harus memuat SELURUH album ke antrean, bukan
+        # satu lagu saja — kalau tidak, tombol "berikut" tidak punya tujuan.
+        import json as _json
+        two = [{"title": t["title"], "target": t["path"], "source": "lokal"}
+               for t in app.library.tracks[:2]]
+        (mod.PLAYLIST_DIR / "multi.json").write_text(_json.dumps(two))
+        app.load_playlists(); await pilot.pause(0.4)
+        from textual.widgets import Tree as T1
+        tr = app.query_one("#pltree", T1)
+        node = next(n for n in tr.root.children if "multi" in str(n.label))
+        leaf2 = node.children[1]
+        tr.focus(); tr.move_cursor(leaf2); await pilot.pause(0.2)
+        tr.action_select_cursor(); await pilot.pause(1.0)
+        check("putar daun memuat album", len(app.queue) == 2, f"{len(app.queue)} lagu")
+        check("mulai dari lagu yang dipilih",
+              app.queue and app.queue[0]["target"] == two[1]["target"])
+
+        # Indikator lagu yang sedang diputar.
+        app._mark_now_playing(two[1]["target"])
+        await pilot.pause(0.3)
+        marked = [str(l.label) for n in tr.root.children for l in n.children
+                  if str(l.label).startswith("▶")]
+        check("indikator lagu aktif", len(marked) == 1, f"{len(marked)} baris ditandai")
+
         # Keluarkan lagu dari album lewat node daun di tree.
         app.query_one("#tabs").active = "tab-pl"
         await pilot.pause(0.4)

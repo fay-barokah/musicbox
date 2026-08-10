@@ -908,6 +908,7 @@ class MusicBox(App):
         self.dl_format = "mp3"
         self._pending_delete: str | None = None
         self._pending_add: dict | None = None
+        self._marked_path: str | None = None
         self.image_ok = True
         self.downloads: list[dict] = []
         self.queue: list[dict] = []
@@ -1024,8 +1025,45 @@ class MusicBox(App):
             self.notify(f"{MUSIC_DIR} kosong. Unduh dengan: music -d \"judul\"",
                         severity="warning", timeout=8)
 
+    def _mark_now_playing(self, path: str | None) -> None:
+        """Tandai baris yang sedang berbunyi di semua daftar.
+
+        Tanpa ini posisi pemutaran hanya terbaca di bar bawah — saat album
+        berisi banyak lagu, tidak ada cara melihat sedang di lagu mana.
+        """
+        marker = "▶ "
+        try:
+            table = self.query_one("#library", DataTable)
+            for i, t in enumerate(self.library.tracks):
+                label = (marker if t["path"] == path else "  ") + t["title"]
+                table.update_cell_at((i, 0), label, update_width=False)
+        except Exception:
+            pass
+        try:
+            table = self.query_one("#queue", DataTable)
+            for i, q in enumerate(self.queue):
+                label = (marker if q.get("target") == path else "  ") + q.get("title", "?")
+                table.update_cell_at((i, 1), label, update_width=False)
+        except Exception:
+            pass
+        try:
+            tree = self.query_one("#pltree", Tree)
+            for node in tree.root.children:
+                for leaf in node.children:
+                    it = (leaf.data or {}).get("item") or {}
+                    mark = marker if it.get("target") == path else "  "
+                    leaf.set_label(mark + it.get("title", "?"))
+        except Exception:
+            pass
+
     def refresh_now_playing(self) -> None:
         st = self.player.state
+        # Penanda hanya digambar ulang saat lagunya benar-benar berganti,
+        # bukan tiap setengah detik.
+        path = st.get("path")
+        if path != self._marked_path:
+            self._marked_path = path
+            self._mark_now_playing(path)
         title = st.get("title") or "tidak ada yang diputar"
         if st.get("pause") and st.get("path"):
             title = f"⏸  {title}"
@@ -1552,8 +1590,19 @@ class MusicBox(App):
         if not data:
             return
         if "item" in data:
-            # Daun: satu lagu — langsung putar.
-            await self.player.play(data["item"]["target"])
+            # Daun: putar SELURUH album mulai dari lagu ini, bukan lagu itu
+            # sendirian. Memuat satu lagu saja membuat mpv tidak punya playlist,
+            # sehingga tombol "berikut" tidak punya tujuan dan pemutaran
+            # berhenti begitu lagu itu habis.
+            name = data["playlist"]
+            items = list(self.playlists.get(name, []))
+            target = data["item"].get("target")
+            start = next((i for i, it in enumerate(items)
+                          if it.get("target") == target), 0)
+            self.queue = items[start:] + items[:start]
+            self.save_queue()
+            self.refresh_queue_table()
+            await self.action_play_queue(loop=True)
         else:
             # Induk: seluruh playlist dimuat ke antrean lalu diputar.
             self.queue = list(self.playlists.get(data["playlist"], []))
