@@ -1,4 +1,4 @@
-import asyncio, os, sys, tempfile, traceback
+import asyncio, os, signal, sys, tempfile, traceback
 from pathlib import Path
 
 # Socket & state terpisah supaya tidak bentrok dengan instans yang sedang jalan.
@@ -19,6 +19,18 @@ mod.DOWNLOADS_LOG = mod.STATE_DIR / "downloads.json"
 mod.LIBRARY_CACHE = mod.STATE_DIR / "library.json"
 mod.MPV_SOCKET = Path(tmp) / "mpv.sock"
 
+def _mpris_opt_in() -> bool:
+    """Plugin tetap bisa ditemukan saat MUSICBOX_MPRIS=1 — kalau memang terpasang."""
+    if not any(Path(p).exists() for p in
+               ("/usr/lib/mpv/mpris.so", "/usr/lib/mpv-mpris/mpris.so",
+                "/usr/share/mpv/scripts/mpris.so")):
+        return True                      # tidak terpasang, tidak ada yang diuji
+    os.environ["MUSICBOX_MPRIS"] = "1"
+    try:
+        return mod.MpvPlayer._mpris_script() is not None
+    finally:
+        del os.environ["MUSICBOX_MPRIS"]
+
 fails, checks = [], []
 def check(name, cond, detail=""):
     checks.append((name, bool(cond), detail))
@@ -33,7 +45,11 @@ async def main():
 
         check("aplikasi hidup", app.is_running)
         check("mpv tersambung", app.player.writer is not None)
-        check("mpris dimuat", app.player.mpris)
+        # mpv-mpris sengaja mati secara bawaan: versi 1.2 membunuh mpv di
+        # sebagian perpindahan lagu. Yang diuji sekarang justru bahwa ia TIDAK
+        # ikut termuat kecuali diminta lewat MUSICBOX_MPRIS=1.
+        check("mpris mati secara bawaan", not app.player.mpris)
+        check("mpris bisa dinyalakan lagi", _mpris_opt_in())
 
         lib = app.query_one("#library", DataTable)
         check("library terisi", lib.row_count > 0, f"{lib.row_count} baris")
@@ -171,6 +187,30 @@ async def main():
             check("ekstraksi sampul", True, str(c and c.name))
         except Exception as exc:
             check("ekstraksi sampul", False, f"{type(exc).__name__}: {exc}")
+
+        # mpv yang mati mendadak tidak boleh berubah jadi aplikasi yang membeku.
+        # Ini ditaruh paling akhir karena sengaja membunuh mesin pemutarnya.
+        tracks = app.library.tracks[:3]
+        if tracks:
+            app.queue = [{"title": t["title"], "target": t["path"],
+                          "source": "lokal"} for t in tracks]
+            await app.action_play_queue(loop=True)
+            await pilot.pause(3.0)
+            old_pid = app.player.proc.pid
+            old_path = app.player.state.get("path")
+            os.kill(old_pid, signal.SIGABRT)
+            await pilot.pause(4.5)
+            check("mpv dibangkitkan setelah mati",
+                  app.player.proc.pid != old_pid and app.player.proc.poll() is None)
+            check("lagu yang sama disambung",
+                  app.player.state.get("path") == old_path)
+            check("playlist & loop dipulihkan",
+                  len(app.player.playlist) == len(tracks) and app.player.loop)
+            t1 = app.player.state.get("time-pos") or 0
+            await pilot.pause(2.0)
+            check("pemutaran jalan lagi setelah pulih",
+                  (app.player.state.get("time-pos") or 0) > t1)
+        app.player.shutdown()
 
 asyncio.run(main())
 

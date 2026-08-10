@@ -30,10 +30,12 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
 - **Antrean** yang bisa diurutkan, dan **album** tersimpan berbentuk pohon.
 - **Visualizer** membaca keluaran mentah cava.
 - **Sampul sungguhan** lewat sixel, bukan blok ASCII.
-- **MPRIS**, sehingga tampil di widget media desktop dan bisa dikendalikan dari
-  sana.
 - **Penanda lagu aktif** di daftar library, antrean, dan album.
 - **Lanjut dari terakhir** — lagu dan posisi dipulihkan saat dibuka lagi.
+- **Tahan banting**: kalau mpv mati mendadak, musicbox menghidupkannya lagi di
+  lagu dan detik yang sama, bukan membeku diam-diam.
+- **MPRIS opsional** lewat `MUSICBOX_MPRIS=1` — mati secara bawaan, alasannya
+  di [Catatan teknis](#catatan-teknis).
 
 ## Kebutuhan
 
@@ -43,7 +45,7 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
 | `python-textual` | antarmuka (wajib) |
 | `python-mutagen` | baca tag & sampul (wajib) |
 | `yt-dlp` | cari dan unduh dari YouTube |
-| `mpv-mpris` | tampil di widget media desktop |
+| `mpv-mpris` | tampil di widget media desktop (opsional, lihat catatan) |
 | `cava` | visualizer |
 | `python-textual-image` | sampul sixel |
 
@@ -91,8 +93,9 @@ python3 test_musicbox.py
 ```
 
 Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 68 hal: semua handler keybind ada dan tidak melempar exception,
-perpindahan tab, antrean, album, panel aksi kontekstual, dan ekstraksi sampul.
+Memeriksa 73 hal: semua handler keybind ada dan tidak melempar exception,
+perpindahan tab, antrean, album, panel aksi kontekstual, ekstraksi sampul, dan
+pemulihan setelah mpv dibunuh di tengah lagu.
 
 ## Catatan teknis
 
@@ -114,6 +117,24 @@ waktu untuk ditemukan:
   bawaan Textual mengecat latar solid sehingga transparansi terminal hilang.
 - **`yt-dlp --print` tidak menafsirkan `\t`** — pemisah kolom harus berupa
   karakter tab sungguhan.
+- **mpv-mpris dimatikan secara bawaan.** Versi 1.2 (rilis 2023) di atas mpv
+  0.41 sesekali membunuh mpv saat lagu berpindah: thread `cplugin/mpris2`
+  menyusun sinyal `PropertiesChanged` dari string metadata yang sedang diganti
+  mpv, GLib mendapati UTF-8 tak sah di `append_value_to_blob`, lalu memanggil
+  `abort()`. Prosesnya jadi zombie dan musik berhenti di tengah album, sementara
+  antarmukanya tetap memperlihatkan judul terakhir — terlihat seperti aplikasi
+  yang macet padahal yang mati ada di bawahnya. Terukur di sini: **3 dari 30
+  perpindahan lagu gagal dengan plugin, 0 dari 30 tanpa.** Nyalakan lagi dengan
+  `MUSICBOX_MPRIS=1 musicbox` kalau versi di sistem sudah diperbaiki.
+- **mpv diawasi dan dihidupkan ulang.** Karena kematian seperti di atas bisa
+  datang dari mana saja — plugin pihak ketiga, OOM killer, dekoder yang menyerah
+  — proses mpv diperiksa tiap detik. Kalau mati, ia dibangkitkan lagi dengan
+  playlist, posisi lagu, detik, dan status loop yang sama.
+- **Tiap sambungan IPC punya nomor generasi.** Setelah mpv dihidupkan ulang,
+  task pembaca yang lama harus benar-benar berhenti. Kalau tidak, dua task
+  memanggil `readline()` pada `StreamReader` yang sama, asyncio menolaknya, dan
+  pembaruan properti berhenti mengalir — macet yang sama persis, hanya
+  penyebabnya berpindah ke dalam aplikasi sendiri.
 
 ## Lisensi
 

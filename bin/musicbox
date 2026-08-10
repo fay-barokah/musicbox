@@ -88,21 +88,41 @@ class MpvPlayer:
         self.writer: asyncio.StreamWriter | None = None
         self.mpris = False
         self._req_id = 0
+        # Bayangan playlist mpv. mpv tidak bisa ditanya lagi kalau prosesnya
+        # sudah mati, jadi isinya dicatat di sini supaya bisa dipulihkan.
+        self.playlist: list[str] = []
+        self.loop = False
+        self.restarts = 0
+        self._generation = 0
         self.state: dict = {
             "path": None, "title": None, "pause": True,
             "time-pos": 0.0, "duration": 0.0, "volume": 70.0,
+            "playlist-pos": 0,
         }
         self.on_update = None  # callback tanpa argumen, dipanggil tiap state berubah
 
     @staticmethod
     def _mpris_script() -> str | None:
-        """Cari plugin mpv-mpris kalau terpasang.
+        """Cari plugin mpv-mpris — hanya kalau diminta lewat MUSICBOX_MPRIS=1.
 
-        Tanpa ini musicbox tidak terlihat oleh siapa pun di desktop. Dengan ini
-        ia muncul di widget media Caelestia lengkap dengan judul dan kendali —
-        `Players.qml:18` bahkan menyebut mpv-mpris secara eksplisit di
-        komentarnya, jadi memang sudah diantisipasi.
+        Dengan plugin ini musicbox muncul di widget media Caelestia lengkap
+        dengan judul dan kendali; `Players.qml:18` bahkan menyebut mpv-mpris
+        secara eksplisit. Tapi bawaannya sekarang MATI, dan itu disengaja.
+
+        mpv-mpris 1.2 (rilis 2023) di atas mpv 0.41 sesekali membunuh mpv saat
+        lagu berpindah: thread `cplugin/mpris2` menyusun sinyal PropertiesChanged
+        dari string metadata yang sedang diganti mpv, GLib mendapati UTF-8 tak
+        sah di `append_value_to_blob`, lalu memanggil abort(). Prosesnya jadi
+        zombie dan pemutaran berhenti total di tengah album.
+
+        Terukur di sini: 3 dari 30 perpindahan lagu gagal dengan plugin, 0 dari
+        15 tanpa. Yang dikorbankan hanya kendali dari widget desktop; yang
+        ditebus adalah musik yang tidak mati sendiri. Nyalakan lagi dengan
+        `MUSICBOX_MPRIS=1 musicbox` kalau versi mpv-mpris di sistem sudah
+        diperbaiki.
         """
+        if os.environ.get("MUSICBOX_MPRIS") != "1":
+            return None
         for candidate in ("/usr/lib/mpv/mpris.so", "/usr/lib/mpv-mpris/mpris.so",
                           "/usr/share/mpv/scripts/mpris.so"):
             if Path(candidate).exists():
@@ -129,10 +149,70 @@ class MpvPlayer:
             if MPV_SOCKET.exists():
                 break
             await asyncio.sleep(0.05)
+        # Tutup sambungan lama sebelum yang baru dipasang, kalau ini start ulang.
+        if self.writer is not None:
+            try:
+                self.writer.close()
+            except Exception:
+                pass
         self.reader, self.writer = await asyncio.open_unix_connection(str(MPV_SOCKET))
-        for prop in ("path", "media-title", "pause", "time-pos", "duration", "volume"):
+        for prop in ("path", "media-title", "pause", "time-pos", "duration",
+                     "volume", "playlist-pos"):
             await self._send({"command": ["observe_property", 1, prop]})
-        asyncio.create_task(self._read_loop())
+        # Tiap sambungan punya nomor generasi. Tanpa ini pembaca lama ikut hidup
+        # setelah mpv dihidupkan ulang, lalu dua task berebut `readline()` pada
+        # StreamReader yang sama — asyncio menolaknya, salah satu task mati, dan
+        # pembaruan properti berhenti mengalir. Gejalanya persis seperti mpv yang
+        # macet padahal prosesnya sehat.
+        self._generation += 1
+        asyncio.create_task(self._read_loop(self._generation, self.reader))
+
+    async def ensure_alive(self) -> bool:
+        """Hidupkan lagi mpv kalau prosesnya mati, di lagu dan detik yang sama.
+
+        mpv bisa berhenti mendadak di luar kendali kita — plugin pihak ketiga
+        yang memanggil abort(), OOM killer, dekoder yang menyerah. Tanpa
+        penjagaan ini prosesnya tinggal jadi zombie dan aplikasi tampak macet:
+        judul tetap terpampang, waktu berhenti, semua tombol diam. Gejala itu
+        yang paling membingungkan, karena yang rusak justru bagian yang tak
+        terlihat.
+
+        Mengembalikan True kalau baru saja dibangkitkan, supaya pemanggil bisa
+        memberi tahu pengguna.
+        """
+        if self.proc is None or self.proc.poll() is None:
+            return False
+
+        self.proc.wait()                      # panen zombie-nya
+        playlist, loop = list(self.playlist), self.loop
+        idx = int(self.state.get("playlist-pos") or 0)
+        pos = float(self.state.get("time-pos") or 0.0)
+        was_paused = bool(self.state.get("pause"))
+        vol = float(self.state.get("volume") or 70.0)
+        self.restarts += 1
+
+        try:
+            await self.start()
+        except Exception:
+            return False
+        self.playlist, self.loop = playlist, loop
+
+        if playlist:
+            await self._send({"command": ["loadfile", playlist[0], "replace"]})
+            for target in playlist[1:]:
+                await self._send({"command": ["loadfile", target, "append"]})
+            if loop:
+                await self._send({"command": ["set_property", "loop-playlist", "inf"]})
+            if 0 < idx < len(playlist):
+                await self._send({"command": ["set_property", "playlist-pos", idx]})
+            # Lagu perlu sempat terbuka sebelum bisa dilompati posisinya.
+            if pos > 1:
+                await asyncio.sleep(0.6)
+                await self._send({"command": ["seek", pos, "absolute"]})
+            if was_paused:
+                await self._send({"command": ["set_property", "pause", True]})
+        await self.set_volume_abs(vol)
+        return True
 
     async def _send(self, payload: dict) -> None:
         if not self.writer:
@@ -145,12 +225,12 @@ class MpvPlayer:
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    async def _read_loop(self) -> None:
-        assert self.reader
-        while True:
+    async def _read_loop(self, generation: int, reader: asyncio.StreamReader) -> None:
+        while generation == self._generation:
             try:
-                line = await self.reader.readline()
-            except (ConnectionResetError, asyncio.IncompleteReadError):
+                line = await reader.readline()
+            except (ConnectionResetError, asyncio.IncompleteReadError,
+                    RuntimeError, OSError):
                 break
             if not line:
                 break
@@ -170,6 +250,7 @@ class MpvPlayer:
     # -- perintah ---------------------------------------------------------
 
     async def play(self, target: str) -> None:
+        self.playlist = [target]
         await self._send({"command": ["loadfile", target, "replace"]})
         await self._send({"command": ["set_property", "pause", False]})
 
@@ -182,9 +263,11 @@ class MpvPlayer:
         opts = {"pause": "yes"}
         if position > 1:
             opts["start"] = str(int(position))
+        self.playlist = [target]
         await self._send({"command": ["loadfile", target, "replace", -1, opts]})
 
     async def append(self, target: str) -> None:
+        self.playlist.append(target)
         await self._send({"command": ["loadfile", target, "append-play"]})
 
     async def toggle_pause(self) -> None:
@@ -203,6 +286,7 @@ class MpvPlayer:
         await self._send({"command": ["seek", delta, "relative"]})
 
     async def set_loop(self, enabled: bool) -> None:
+        self.loop = enabled
         await self._send({"command": ["set_property", "loop-playlist",
                                       "inf" if enabled else "no"]})
 
@@ -1003,6 +1087,7 @@ class MusicBox(App):
 
         self.set_interval(0.5, self.refresh_now_playing)
         self.set_interval(2.0, self._watch_scheme)
+        self.set_interval(1.0, self._watch_player)
         try:
             self._scheme_mtime = SCHEME_FILE.stat().st_mtime
         except OSError:
@@ -1011,6 +1096,16 @@ class MusicBox(App):
     def _schedule_refresh(self) -> None:
         # Dipanggil dari task pembaca IPC; jadwalkan di loop UI.
         self.call_later(self.refresh_now_playing)
+
+    async def _watch_player(self) -> None:
+        """Jaga supaya mpv yang mati tidak berubah jadi aplikasi yang membeku."""
+        try:
+            revived = await self.player.ensure_alive()
+        except Exception:
+            return
+        if revived:
+            self.notify("mpv berhenti mendadak — pemutaran disambung kembali",
+                        severity="warning", timeout=5)
 
     # -- data -------------------------------------------------------------
 
