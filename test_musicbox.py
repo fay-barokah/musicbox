@@ -188,6 +188,26 @@ async def main():
         except Exception as exc:
             check("ekstraksi sampul", False, f"{type(exc).__name__}: {exc}")
 
+        # Radio harus meminta yt-dlp membuka daftar Mix. Tanpa yes-playlist mpv
+        # cuma memuat lagu pertamanya dan radionya berhenti di situ. Diperiksa
+        # dari perintah yang dikirim, bukan lewat jaringan, supaya tetap cepat
+        # dan tidak bergantung pada YouTube.
+        sent = []
+        _asli = app.player._send
+        async def _rekam(payload):
+            sent.append(payload)
+            return await _asli(payload)
+        app.player._send = _rekam
+        try:
+            await app.player.play_radio("https://www.youtube.com/watch?v=X&list=RDX")
+        finally:
+            app.player._send = _asli
+        muat = [p for p in sent if p.get("command", [None])[0] == "loadfile"]
+        check("radio mengirim loadfile", len(muat) == 1, f"{len(muat)} perintah")
+        opsi = muat[0]["command"][4] if muat and len(muat[0]["command"]) > 4 else {}
+        check("radio memakai yes-playlist",
+              opsi.get("ytdl-raw-options") == "yes-playlist=", str(opsi))
+
         # mpv yang mati mendadak tidak boleh berubah jadi aplikasi yang membeku.
         # Ini ditaruh paling akhir karena sengaja membunuh mesin pemutarnya.
         tracks = app.library.tracks[:3]

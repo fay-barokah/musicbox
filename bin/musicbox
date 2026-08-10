@@ -266,6 +266,22 @@ class MpvPlayer:
         self.playlist = [target]
         await self._send({"command": ["loadfile", target, "replace", -1, opts]})
 
+    async def play_radio(self, target: str) -> None:
+        """Putar daftar Mix YouTube, bukan cuma lagu pertamanya.
+
+        mpv memberi `--no-playlist` ke yt-dlp secara bawaan, jadi URL berisi
+        `&list=RD…` hanya memuat satu lagu — radio yang berhenti setelah lagu
+        pertama, yang justru kebalikan dari gunanya. Terukur pada satu Mix:
+        1 lagu tanpa opsi ini, 275 dengan.
+
+        Opsinya diberikan per-file, bukan ke seluruh proses mpv, supaya URL
+        biasa yang kebetulan membawa `list=` tidak ikut berubah perilakunya.
+        """
+        self.playlist = [target]
+        await self._send({"command": ["loadfile", target, "replace", -1,
+                                      {"ytdl-raw-options": "yes-playlist="}]})
+        await self._send({"command": ["set_property", "pause", False]})
+
     async def append(self, target: str) -> None:
         self.playlist.append(target)
         await self._send({"command": ["loadfile", target, "append-play"]})
@@ -1785,7 +1801,7 @@ class MusicBox(App):
         if not r:
             self.notify("pilih hasil pencarian dulu", timeout=3)
             return
-        await self.player.play(yt_radio_url(r["id"]))
+        await self.player.play_radio(yt_radio_url(r["id"]))
         self.notify("radio dimulai", timeout=2)
 
     # -- pemutaran ---------------------------------------------------------

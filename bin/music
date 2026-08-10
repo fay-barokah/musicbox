@@ -158,7 +158,11 @@ menu_loop() {
                 read -r -p "titik awal: " q; [ -n "$q" ] || continue
                 id=$(pick_video "$q") || continue
                 echo "▶ radio dimulai (mix rekomendasi)"
+                # yes-playlist wajib: mpv memberi --no-playlist ke yt-dlp secara
+                # bawaan, jadi tanpa ini URL &list=RD... hanya memuat satu lagu
+                # dan radionya berhenti setelah lagu pertama.
                 mpv "${opts[@]}" --loop-playlist=no \
+                    --ytdl-raw-options=yes-playlist= \
                     "https://www.youtube.com/watch?v=$id&list=RD$id" ;;
             audacious)
                 command -v audacious >/dev/null \
@@ -238,8 +242,12 @@ if [ "$RADIO" -eq 1 ]; then
     [ -n "${id:-}" ] || { echo "tidak ketemu" >&2; exit 1; }
     # Playlist ber-awalan RD adalah "Mix" YouTube: daftar rekomendasi berantai
     # yang terus menyambung sendiri. Inilah autoplay berbasis algoritma.
+    # yes-playlist wajib: mpv memberi --no-playlist ke yt-dlp secara bawaan,
+    # jadi tanpa ini yang termuat cuma lagu pertamanya. Terukur pada satu Mix:
+    # 1 lagu tanpa opsi ini, 275 dengan.
     echo "▶ radio dimulai (mix rekomendasi, ratusan lagu)"
     exec mpv "${opts[@]}" --loop-playlist=no \
+        --ytdl-raw-options=yes-playlist= \
         "https://www.youtube.com/watch?v=$id&list=RD$id"
 fi
 

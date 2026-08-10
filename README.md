@@ -93,9 +93,14 @@ python3 test_musicbox.py
 ```
 
 Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 73 hal: semua handler keybind ada dan tidak melempar exception,
-perpindahan tab, antrean, album, panel aksi kontekstual, ekstraksi sampul, dan
-pemulihan setelah mpv dibunuh di tengah lagu.
+Memeriksa 75 hal: semua handler keybind ada dan tidak melempar exception,
+perpindahan tab, antrean, album, panel aksi kontekstual, ekstraksi sampul,
+perintah yang dikirim radio, dan pemulihan setelah mpv dibunuh di tengah lagu.
+
+Suite ini sengaja tidak menyentuh jaringan supaya cepat dan tidak bergantung
+pada YouTube. Jalur berjaringan — pencarian, streaming, radio, dan unduhan mp3
+serta opus lengkap dengan pemeriksaan codec, sampul, dan metadata — diuji
+terpisah dan pernah dijalankan penuh sebelum rilis.
 
 ## Catatan teknis
 
@@ -117,6 +122,12 @@ waktu untuk ditemukan:
   bawaan Textual mengecat latar solid sehingga transparansi terminal hilang.
 - **`yt-dlp --print` tidak menafsirkan `\t`** — pemisah kolom harus berupa
   karakter tab sungguhan.
+- **Radio harus meminta `yes-playlist`.** mpv memberi `--no-playlist` ke yt-dlp
+  secara bawaan, jadi URL Mix (`&list=RD…`) hanya memuat lagu pertamanya —
+  radio yang berhenti setelah satu lagu, persis kebalikan dari gunanya. Terukur
+  pada satu Mix: **1 lagu tanpa opsi ini, 509 dengan.** Opsinya dikirim per-file
+  lewat `loadfile`, bukan ke seluruh proses mpv, supaya URL biasa yang kebetulan
+  membawa `list=` tidak ikut berubah perilakunya.
 - **mpv-mpris dimatikan secara bawaan.** Versi 1.2 (rilis 2023) di atas mpv
   0.41 sesekali membunuh mpv saat lagu berpindah: thread `cplugin/mpris2`
   menyusun sinyal `PropertiesChanged` dari string metadata yang sedang diganti
