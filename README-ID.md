@@ -55,8 +55,8 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
   milik lagu-lagu itu.
 - **Dua bahasa** — Inggris sebagai bawaan, Indonesia lewat `g` atau Settings.
 - **Setelan berkategori** (`,`) — tampilan, bahasa, pemutaran, kontrol, tentang.
-  `?` membuka overlay yang sama langsung di daftar pintasan, yang dibangun dari
-  keybind aslinya sehingga tidak bisa menyimpang dari kenyataan.
+  Daftar pintasan adalah salah satu kategorinya, dibangun dari keybind aslinya
+  sehingga tidak bisa menyimpang dari kenyataan.
 
 ## Kebutuhan
 
@@ -211,12 +211,19 @@ waktu untuk ditemukan:
   lewat judul yang dinormalkan NFKD terhadap nama berkas di `~/Music`, karena
   yt-dlp memakai judul sebagai nama berkas. Tekan `d` lagi kalau memang ingin
   mengunduh ulang.
+- **`?` sengaja tidak diikat.** textual-image bicara langsung ke terminal: ia
+  mengirim query lalu membaca balasannya sendiri. Balasan itu berbentuk
+  `ESC [ ? 62 ; 4 c`, dan sisa byte yang tidak sempat ia telan sampai ke Textual
+  sebagai penekanan tombol — termasuk `?`. Dengan `?` terikat ke sebuah aksi,
+  aksi itu jalan sendiri tepat saat aplikasi dibuka. Pemeriksaan sixel kini
+  dilakukan di `main()` sebelum Textual membaca papan ketik, dan daftar
+  pintasan tinggal di dalam Setelan alih-alih punya tombol sendiri.
 - **Satu overlay, bukan empat permukaan.** Panel bantuan bawaan Textual
   menempel di sisi kanan dan berebut ruang dengan panel info — dua kolom teks
   bersebelahan yang sama-sama menuntut dibaca sekaligus, di atas footer dan
-  command palette yang juga minta perhatian. `?` sekarang bermuara ke overlay
-  Setelan yang sama, langsung di kategori Kontrol. Yang sedang dibaca cuma satu
-  hal pada satu waktu.
+  command palette yang juga minta perhatian. Daftar pintasan kini jadi salah
+  satu kategori di dalam Setelan. Yang sedang dibaca cuma satu hal pada satu
+  waktu.
 - **Label footer tidak menyebut tombolnya.** Textual sudah mencetak tombol di
   depan deskripsi; label yang ikut menyebutnya menghasilkan `? ? Help`.
 - **Setelan dikelompokkan sejak awal.** Satu daftar panjang akan terus memanjang

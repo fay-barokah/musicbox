@@ -260,8 +260,12 @@ async def main():
         tampil = [b for b in app.BINDINGS if getattr(b, "show", False)]
         check("footer ringkas", len(tampil) <= 4, f"{len(tampil)} entri")
         label = " ".join(b.description for b in tampil)
-        check("footer memuat Settings dan Shortcuts",
-              "Settings" in label and "Shortcuts" in label, label[:40])
+        check("footer memuat Settings", "Settings" in label, label[:40])
+        # "?" sengaja TIDAK diikat. textual-image menanyai terminal dan sisa
+        # balasannya (ESC [ ? 62 ; 4 c) sampai ke Textual sebagai tombol — "?"
+        # yang terikat aksi akan menjalankannya sendiri saat aplikasi dibuka.
+        check("tombol ? tidak diikat",
+              not any(b.key == "question_mark" for b in app.BINDINGS))
         # Footer sudah mencetak tombolnya; label yang ikut menyebut tombol
         # membuatnya tercetak dua kali ("? ? Help").
         check("label footer tidak mengulang tombolnya",

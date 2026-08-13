@@ -2248,7 +2248,6 @@ class MusicBox(App):
         Binding("u", "unlike", show=False, description=_("Unlike")),
         Binding("V", "rekomendasi", show=False, description=_("Recommend")),
         Binding("comma", "settings", _("Settings")),
-        Binding("question_mark", "help", _("Shortcuts")),
         Binding("g", "bahasa", show=False, description="Language"),
         Binding("x", "delete_track", show=False, description=_("Delete")),
         Binding("e", "enqueue", show=False, description=_("Enqueue")),
@@ -2442,12 +2441,10 @@ class MusicBox(App):
         self.push_screen(SettingsScreen())
 
     def action_help(self) -> None:
-        """Daftar pintasan, di dalam overlay yang sama dengan Setelan.
+        """Alias lama untuk Setelan, kategori Kontrol.
 
-        Panel bantuan bawaan Textual menempel di sisi kanan dan berebut ruang
-        dengan panel info — dua kolom teks bersebelahan yang sama-sama menuntut
-        dibaca sekaligus. Satu overlay yang menutupi layar jauh lebih tenang:
-        yang sedang dibaca cuma satu hal.
+        Tidak lagi punya tombol sendiri: daftar pintasan adalah salah satu
+        kategori di dalam Setelan, bukan layar terpisah yang isinya sama.
         """
         self.push_screen(SettingsScreen(kategori="Controls"))
 
@@ -4000,8 +3997,28 @@ def already_running() -> int | None:
     return pid if "musicbox" in cmd else None
 
 
+def cek_sixel() -> bool:
+    """Tanyakan dukungan sixel ke terminal SEBELUM Textual mulai berjalan.
+
+    textual-image bicara langsung ke terminal: ia mengirim query lalu membaca
+    balasannya sendiri. Balasan itu berbentuk `ESC [ ? 62 ; 4 c`, dan sisa byte
+    yang tidak sempat ia telan akan sampai ke Textual sebagai penekanan tombol
+    — termasuk `?`. Kalau `?` kebetulan terikat ke sebuah aksi, aksi itu jalan
+    sendiri tepat saat aplikasi dibuka.
+
+    Dilakukan di sini, saat belum ada yang membaca papan ketik, sehingga
+    balasannya habis di tempat yang benar.
+    """
+    try:
+        from textual_image.renderable import Image  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def main() -> int:
     muat_bahasa()
+    cek_sixel()
     if shutil.which("mpv") is None:
         print("mpv belum terpasang", flush=True)
         return 1

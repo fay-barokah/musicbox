@@ -52,8 +52,8 @@ scheme when it is available, and fall back to a built-in palette when it is not.
   Mixes of those songs.
 - **Two languages** — English by default, Indonesian via `g` or Settings.
 - **Grouped settings** (`,`) — appearance, language, playback, controls, about.
-  `?` opens the same overlay straight at the shortcut list, which is built from
-  the real keybindings and so cannot drift from reality.
+  The shortcut list is one of those categories, built from the real keybindings
+  so it cannot drift from reality.
 
 ## Requirements
 
@@ -92,7 +92,7 @@ musicbox
 
 The buttons in the bottom bar are playback controls. Actions that work on a
 single song — play, queue, album, download, delete — live in the side panel and
-change with the open tab. Press `,` for settings and `?` for every shortcut.
+change with the open tab. Press `,` for settings; the shortcut list is a category inside it.
 
 ### `music` — the CLI companion
 
@@ -186,11 +186,18 @@ took a while to find:
   Matched first by the URL in the download log — the most reliable signal — then
   by NFKD-normalised title against the filenames in `~/Music`, since yt-dlp uses
   the title as the filename. Press `d` again if you really do want another copy.
+- **`?` is deliberately not bound.** textual-image talks to the terminal
+  directly: it sends a capability query and reads the reply itself. That reply
+  looks like `ESC [ ? 62 ; 4 c`, and whatever bytes it does not consume reach
+  Textual as key presses — including `?`. With `?` bound to an action, that
+  action fired by itself the moment the app opened. The sixel probe now happens
+  in `main()` before Textual starts reading the keyboard, and the shortcut list
+  lives inside Settings rather than behind its own key.
 - **One overlay, not four surfaces.** Textual's built-in help panel docks to the
   right and competes with the info panel — two columns of text side by side, both
   demanding to be read, on top of a footer and a command palette also asking for
-  attention. `?` now leads to the same Settings overlay, straight at the Controls
-  category. Only one thing is being read at a time.
+  attention. The shortcut list is now a category inside Settings. Only one thing
+  is being read at a time.
 - **The command palette is switched off.** It lists Textual's own internal
   commands — Maximize, Screenshot, Theme — which have nothing to do with playing
   music, and it was a fourth surface offering them.
