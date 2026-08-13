@@ -53,8 +53,8 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
   milik lagu-lagu itu.
 - **Dua bahasa** — Inggris sebagai bawaan, Indonesia lewat `g` atau Settings.
 - **Setelan berkategori** (`,`) — tampilan, bahasa, pemutaran, kontrol, tentang.
-- **Daftar pintasan** (`?`) yang dibangun dari keybind aslinya, jadi tidak bisa
-  menyimpang dari kenyataan.
+  `?` membuka overlay yang sama langsung di daftar pintasan, yang dibangun dari
+  keybind aslinya sehingga tidak bisa menyimpang dari kenyataan.
 
 ## Kebutuhan
 
@@ -115,7 +115,7 @@ python3 test_musicbox.py
 ```
 
 Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 117 hal: semua handler keybind ada dan tidak melempar exception,
+Memeriksa 122 hal: semua handler keybind ada dan tidak melempar exception,
 perpindahan tab, antrean, album, panel aksi kontekstual, ekstraksi sampul,
 perintah yang dikirim radio, pendaftaran MPRIS, sel progres unduhan, penguraian
 lirik, dan pemulihan setelah mpv dibunuh di tengah lagu.
@@ -204,6 +204,14 @@ waktu untuk ditemukan:
   tersisa `⚙ Settings` dan `? Help`; sisanya tetap berfungsi dan tetap muncul
   lengkap di layar Help. Menguranginya, bukan mempercantiknya, yang membuat bar
   itu terbaca.
+- **Satu overlay, bukan empat permukaan.** Panel bantuan bawaan Textual
+  menempel di sisi kanan dan berebut ruang dengan panel info — dua kolom teks
+  bersebelahan yang sama-sama menuntut dibaca sekaligus, di atas footer dan
+  command palette yang juga minta perhatian. `?` sekarang bermuara ke overlay
+  Setelan yang sama, langsung di kategori Kontrol. Yang sedang dibaca cuma satu
+  hal pada satu waktu.
+- **Label footer tidak menyebut tombolnya.** Textual sudah mencetak tombol di
+  depan deskripsi; label yang ikut menyebutnya menghasilkan `? ? Help`.
 - **Setelan dikelompokkan sejak awal.** Satu daftar panjang akan terus memanjang
   tiap ada opsi baru, dan yang jarang dipakai ikut menghalangi yang sering.
   Kategori di kiri membuat tambahan berikutnya masuk ke kelompoknya.

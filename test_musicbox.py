@@ -245,8 +245,13 @@ async def main():
         tampil = [b for b in app.BINDINGS if getattr(b, "show", False)]
         check("footer ringkas", len(tampil) <= 4, f"{len(tampil)} entri")
         label = " ".join(b.description for b in tampil)
-        check("footer memuat Settings dan Help",
-              "Settings" in label and "Help" in label, label[:40])
+        check("footer memuat Settings dan Shortcuts",
+              "Settings" in label and "Shortcuts" in label, label[:40])
+        # Footer sudah mencetak tombolnya; label yang ikut menyebut tombol
+        # membuatnya tercetak dua kali ("? ? Help").
+        check("label footer tidak mengulang tombolnya",
+              not any(b.description.strip().startswith(("?", ",", "^"))
+                      for b in tampil), label[:40])
 
         # Tombol yang terikat dua kali membuat yang belakangan mati diam-diam —
         # persis yang pernah terjadi pada plus/minus (volume vs kerapatan).
@@ -293,6 +298,29 @@ async def main():
             await pilot.pause(0.4)
             check("bisa keluar dari Settings",
                   not isinstance(app.screen, mod.SettingsScreen))
+
+        # Label panel info ikut bahasa, bukan tertinggal dalam satu bahasa.
+        mod.simpan_bahasa("id")
+        check("label panel info ikut diterjemahkan",
+              mod._("artist") == "artis" and mod._("duration") == "durasi",
+              f"{mod._('artist')} / {mod._('duration')}")
+        mod.simpan_bahasa("en")
+        check("label panel info kembali Inggris", mod._("artist") == "artist")
+
+        # "?" bermuara ke overlay yang sama, langsung di kategori Kontrol —
+        # bukan panel tempel terpisah yang berebut ruang dengan panel info.
+        app.action_help()
+        await pilot.pause(0.6)
+        bantuan = app.screen
+        check("? membuka overlay yang sama",
+              isinstance(bantuan, mod.SettingsScreen)
+              and bantuan.kategori == "Controls",
+              f"{type(bantuan).__name__}/{getattr(bantuan, 'kategori', '-')}")
+        if isinstance(bantuan, mod.SettingsScreen):
+            n = len(bantuan.query(".opsi"))
+            check("daftar pintasan terisi dari BINDINGS", n >= 20, f"{n} pintasan")
+            bantuan.action_close()
+            await pilot.pause(0.4)
 
         # Bahasa: Inggris bawaan, terjemahan bekerja, teks asing tetap terbaca.
         mod.simpan_bahasa("en")

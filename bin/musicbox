@@ -1101,6 +1101,10 @@ TERJEMAHAN = {
         "Unlike": "Buang suka", "Recommend": "Rekomendasi",
         "Delete": "Hapus", "Enqueue": "Antrekan",
         "Play queue": "Putar antrean", "Add to album": "Tambah ke album",
+        "artist": "artis", "duration": "durasi", "size": "ukuran",
+        "channel": "kanal", "views": "ditonton", "likes": "suka",
+        "position": "urutan", "source": "sumber", "time": "waktu",
+        "of": "dari", "Shortcuts": "Pintasan",
         "Change": "Ubah", "Density": "Kerapatan",
         "Download format": "Format unduhan",
         "All shortcuts": "Semua pintasan",
@@ -1774,9 +1778,9 @@ class SettingsScreen(ModalScreen[None]):
 
     KATEGORI = ["Appearance", "Language", "Playback", "Controls", "About"]
 
-    def __init__(self) -> None:
+    def __init__(self, kategori: str = "Appearance") -> None:
         super().__init__()
-        self.kategori = "Appearance"
+        self.kategori = kategori
 
     def compose(self) -> ComposeResult:
         with Vertical(id="setel-kotak"):
@@ -1818,7 +1822,17 @@ class SettingsScreen(ModalScreen[None]):
                 ("format", _("Download format"), app.dl_format, True),
             ]
         if k == "Controls":
-            return [("help", _("All shortcuts"), "→", True)]
+            # Dibaca dari BINDINGS aplikasi, bukan daftar tulisan tangan:
+            # daftar terpisah pasti menyimpang begitu ada keybind yang berubah.
+            baris = []
+            for b in app.BINDINGS:
+                if not b.description:
+                    continue
+                tombol = b.key.replace("question_mark", "?").replace("comma", ",")
+                tombol = tombol.replace("equals_sign", "=").replace("plus", "+")
+                tombol = tombol.replace("minus", "-").replace("space", "space")
+                baris.append((f"key:{b.key}", b.description, tombol, False))
+            return baris
         return [
             ("v", "musicbox", "1.0", False),
             ("cfg", _("Settings file"), str(STATE_DIR).replace(str(HOME), "~"), False),
@@ -2055,7 +2069,7 @@ class MusicBox(App):
     SettingsScreen { align: center middle; background: $cae-surface 80%; }
     #setel-kotak {
         width: 78;
-        height: 24;
+        height: 28;
         background: $cae-container;
         border: round $cae-primary;
         padding: 1 2;
@@ -2063,7 +2077,17 @@ class MusicBox(App):
     #setel-judul { height: 1; color: $cae-primary; text-style: bold; }
     #setel-isi { height: 1fr; padding: 1 0 0 0; }
     #setel-nav { width: 22; height: 1fr; border-right: solid $cae-outline; }
-    #setel-opsi { width: 1fr; height: 1fr; padding: 0 0 0 2; }
+    #setel-opsi {
+        width: 1fr;
+        height: 1fr;
+        padding: 0 0 0 2;
+        /* Kategori Kontrol memuat semua pintasan — jauh lebih panjang daripada
+           tinggi dialog, jadi harus bisa digulir sendiri. */
+        overflow-y: auto;
+        scrollbar-background: transparent;
+        scrollbar-color: $cae-primary;
+        scrollbar-size-vertical: 1;
+    }
     #setel-bantuan { height: 1; color: $cae-on-variant; }
     SettingRow { height: 1; color: $cae-on-variant; background: transparent; }
     SettingRow.bisa:hover { color: $cae-primary; background: $cae-container-high; }
@@ -2171,8 +2195,8 @@ class MusicBox(App):
         Binding("l", "like", _("Like"), show=False),
         Binding("u", "unlike", show=False, description=_("Unlike")),
         Binding("V", "rekomendasi", show=False, description=_("Recommend")),
-        Binding("comma", "settings", "⚙ " + _("Settings")),
-        Binding("question_mark", "help", "? " + _("Help")),
+        Binding("comma", "settings", _("Settings")),
+        Binding("question_mark", "help", _("Shortcuts")),
         Binding("g", "bahasa", show=False, description="Language"),
         Binding("x", "delete_track", show=False, description=_("Delete")),
         Binding("e", "enqueue", show=False, description=_("Enqueue")),
@@ -2360,13 +2384,14 @@ class MusicBox(App):
         self.push_screen(SettingsScreen())
 
     def action_help(self) -> None:
-        """Daftar pintasan lengkap.
+        """Daftar pintasan, di dalam overlay yang sama dengan Setelan.
 
-        Memakai panel bawaan Textual, bukan daftar tulisan tangan: panel itu
-        dibangun dari BINDINGS yang sama yang dipakai aplikasi, jadi tidak bisa
-        menyimpang dari kenyataan seperti dokumentasi yang ditulis terpisah.
+        Panel bantuan bawaan Textual menempel di sisi kanan dan berebut ruang
+        dengan panel info — dua kolom teks bersebelahan yang sama-sama menuntut
+        dibaca sekaligus. Satu overlay yang menutupi layar jauh lebih tenang:
+        yang sedang dibaca cuma satu hal.
         """
-        self.action_show_help_panel()
+        self.push_screen(SettingsScreen(kategori="Controls"))
 
     def action_zoom_in(self) -> None:
         self._zoom(1)
@@ -2936,7 +2961,7 @@ class MusicBox(App):
             info.update("\n".join([
                 f"[b]{it.get('title', '?')}[/b]", "",
                 f"album    {name}",
-                f"sumber   {it.get('source', '?')}",
+                f"{_('source'):<9}{it.get('source', '?')}",
                 "", f"[dim]{target}[/dim]",
             ]))
         else:
@@ -3162,10 +3187,10 @@ class MusicBox(App):
             self.show_cover(extract_cover(p))
             lines = [
                 f"[b]{t['title']}[/b]", "",
-                f"artis    {t['artist'] or '—'}",
-                f"durasi   {fmt_time(t['duration'])}",
-                f"format   {p.suffix.lstrip('.') or '—'}",
-                f"ukuran   {size:.1f} MB",
+                f"{_('artist'):<9}{t['artist'] or '—'}",
+                f"{_('duration'):<9}{fmt_time(t['duration'])}",
+                f"{_('format'):<9}{p.suffix.lstrip('.') or '—'}",
+                f"{_('size'):<9}{size:.1f} MB",
                 "", f"[dim]{p.name}[/dim]",
             ]
         elif table_id == "results" and 0 <= idx < len(self.results):
@@ -3182,10 +3207,10 @@ class MusicBox(App):
                                 name="likes", group="likes", exit_on_error=False)
             lines = [
                 f"[b]{r['title']}[/b]", "",
-                f"kanal    {r['uploader']}",
-                f"durasi   {r['duration']}",
-                f"ditonton {fmt_count(r.get('views'))}",
-                f"suka     {r['likes'] if r['likes'] == '…' else fmt_count(r['likes'])}",
+                f"{_('channel'):<9}{r['uploader']}",
+                f"{_('duration'):<9}{r['duration']}",
+                f"{_('views'):<9}{fmt_count(r.get('views'))}",
+                f"{_('likes'):<9}{r['likes'] if r['likes'] == '…' else fmt_count(r['likes'])}",
                 "", f"[dim]{yt_url(r['id'])}[/dim]",
                 "", "[dim]enter putar · d unduh · R radio[/dim]",
             ]
@@ -3197,18 +3222,18 @@ class MusicBox(App):
             lagu = next((x for x in self.library.tracks
                          if x["path"] == str(target)), None) if lokal else None
             lines = [f"[b]{q.get('title', '?')}[/b]", "",
-                     f"urutan   {idx + 1} dari {len(self.queue)}",
-                     f"sumber   {q.get('source', '—')}"]
+                     f"{_('position'):<9}{idx + 1} {_('of')} {len(self.queue)}",
+                     f"{_('source'):<9}{q.get('source', '—')}"]
             if lagu:
-                lines += [f"artis    {lagu['artist'] or '—'}",
-                          f"durasi   {fmt_time(lagu['duration'])}"]
+                lines += [f"{_('artist'):<9}{lagu['artist'] or '—'}",
+                          f"{_('duration'):<9}{fmt_time(lagu['duration'])}"]
             lines += ["", f"[dim]{Path(target).name if lokal else target}[/dim]"]
         elif table_id == "liked" and 0 <= idx < len(self.liked):
             lagu = self.liked[idx]
             self._show_cover_for(lagu.get("target"))
             lines = [f"[b]{lagu.get('title', '?')}[/b]", "",
-                     f"sumber   {lagu.get('source', '—')}",
-                     f"urutan   {idx + 1} dari {len(self.liked)}",
+                     f"{_('source'):<9}{lagu.get('source', '—')}",
+                     f"{_('position'):<9}{idx + 1} {_('of')} {len(self.liked)}",
                      "", f"[dim]{lagu.get('target', '')}[/dim]",
                      "", "[dim]V rekomendasi · R radio · u buang[/dim]"]
         elif table_id == "radio" and 0 <= idx < len(self.radio_list):
@@ -3216,7 +3241,7 @@ class MusicBox(App):
             judul = e.get("title") or Path(str(e.get("filename", "?"))).name
             self._show_cover_for(e.get("filename"))
             lines = [f"[b]{judul}[/b]", "",
-                     f"urutan   {idx + 1} dari {len(self.radio_list)}",
+                     f"{_('position'):<9}{idx + 1} {_('of')} {len(self.radio_list)}",
                      "sumber   radio YouTube",
                      "", f"[dim]{e.get('filename', '')}[/dim]",
                      "", "[dim]enter melompat ke lagu ini[/dim]"]
@@ -3225,9 +3250,9 @@ class MusicBox(App):
             self._show_cover_for(d.get("url"))
             lines = [
                 f"[b]{d.get('title', '?')}[/b]", "",
-                f"format   {d.get('format', '?')}",
-                f"status   {d.get('status', '?')}",
-                f"waktu    {d.get('time', '?')}",
+                f"{_('format'):<9}{d.get('format', '?')}",
+                f"{_('status'):<9}{d.get('status', '?')}",
+                f"{_('time'):<9}{d.get('time', '?')}",
                 "", f"[dim]{d.get('url', '')}[/dim]",
             ]
         if not lines:
