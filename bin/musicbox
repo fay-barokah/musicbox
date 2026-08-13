@@ -1105,6 +1105,50 @@ TERJEMAHAN = {
         "channel": "kanal", "views": "ditonton", "likes": "suka",
         "position": "urutan", "source": "sumber", "time": "waktu",
         "of": "dari", "Shortcuts": "Pintasan",
+        "Search YouTube": "Cari di YouTube",
+        "Type above and press Enter.": "Ketik di atas lalu tekan Enter.",
+        "after results appear:": "setelah hasil muncul:",
+        "load more": "muat lebih banyak", "sort by views": "urutkan terbanyak",
+        "Queue is empty": "Antrean kosong",
+        "add songs with + from Library or Search,":
+            "tambahkan lagu dengan + dari Library atau Cari,",
+        "then press enter here to play them all.":
+            "lalu tekan enter di sini untuk memutar semuanya.",
+        "Library is empty": "Library kosong",
+        "download from Search with d, or put":
+            "unduh dari tab Cari dengan d, atau taruh",
+        "files in ~/Music and press r to rescan.":
+            "berkas di ~/Music lalu tekan r untuk memindai ulang.",
+        "No liked songs yet": "Belum ada lagu disukai",
+        "press l on any song to like it.":
+            "tekan l pada lagu mana pun untuk menyukainya.",
+        "musicbox builds recommendations from this list.":
+            "dari daftar ini musicbox menyusun rekomendasi.",
+        "Radio is off": "Radio belum menyala",
+        "pick a song in Search and press R.":
+            "pilih lagu di tab Cari lalu tekan R.",
+        "radio follows YouTube recommendations":
+            "radio mengikuti rekomendasi YouTube",
+        "based on that song.": "berdasarkan lagu itu.",
+        "No downloads yet": "Belum ada unduhan",
+        "pick a song in Search and press d.":
+            "pilih lagu di tab Cari lalu tekan d.",
+        "f switches between mp3 and opus.":
+            "f mengganti antara mp3 dan opus.",
+        "type above and press Enter": "ketik di atas lalu tekan Enter",
+        "searching": "mencari", "top results": "hasil teratas",
+        "results for": "hasil untuk", "no results for": "tidak ada hasil untuk",
+        "loading radio list…": "memuat daftar radio…",
+        "songs": "lagu", "now at": "sekarang di nomor",
+        "enter jumps to a song": "enter untuk melompat ke lagu",
+        "enter jumps to this song": "enter melompat ke lagu ini",
+        "like": "sukai", "recommend": "rekomendasi",
+        "pick an album or a song inside it": "pilih album atau lagu di dalamnya",
+        "already downloaded": "sudah diunduh",
+        "Already in your library": "Sudah ada di library",
+        "press d again to download anyway":
+            "tekan d sekali lagi untuk tetap mengunduh",
+        "pick a search result first": "pilih hasil pencarian dulu",
         "Change": "Ubah", "Density": "Kerapatan",
         "Download format": "Format unduhan",
         "All shortcuts": "Semua pintasan",
@@ -2227,6 +2271,7 @@ class MusicBox(App):
         self._lyr_mark: dict[str, bool] = {}
         self.radio_list: list[dict] = []
         self.liked: list[dict] = []
+        self._pending_dl: str | None = None
         self.zoom = 1
         self.mpris: MprisService | None = None
         self.results: list[dict] = []
@@ -2337,8 +2382,8 @@ class MusicBox(App):
         self.load_playlists()
         self.load_liked()
         self.load_library()
-        self._status_hasil("ketik di atas lalu Enter  ·  "
-                           "m muat lebih banyak  ·  o urutkan")
+        self._status_hasil(f"{_('type above and press Enter')}  ·  "
+                           f"m {_('load more')}  ·  o {_('sort by views')}")
 
         await self.player.start()
         self.player.on_update = self._schedule_refresh
@@ -2445,10 +2490,10 @@ class MusicBox(App):
         tabel.clear()
         for lagu in self.liked:
             tabel.add_row(lagu.get("title", "?"), lagu.get("source", "—"))
-        status.update(f"{len(self.liked)} lagu disukai  ·  "
-                      "[dim]l menyukai · u membuang · V rekomendasi[/dim]"
+        status.update(f"{len(self.liked)} {_('liked songs')}  ·  "
+                      f"[dim]l {_('like')} · u {_('unlike')} · V {_('recommend')}[/dim]"
                       if self.liked else
-                      "[dim]tekan l pada lagu mana pun untuk menyukainya[/dim]")
+                      f"[dim]{_('press l on any song to like it.')}[/dim]")
 
     def action_like(self) -> None:
         """Sukai lagu yang disorot, atau yang sedang berbunyi."""
@@ -2531,12 +2576,9 @@ class MusicBox(App):
             return
         if not self.player.radio:
             tabel.clear()
-            status.update("[b]Radio belum menyala[/b]\n\n"
-                          "[dim]pilih lagu di tab Cari lalu tekan R.\n"
-                          "radio menyambung sendiri ke rekomendasi\n"
-                          "berdasarkan lagu itu.[/dim]")
+            status.update(self.PETUNJUK["radio"]())
             return
-        status.update("memuat daftar radio…")
+        status.update(_("loading radio list…"))
         entri = await self.player.playlist_entries()
         self.radio_list = entri
         tabel.clear()
@@ -2545,9 +2587,9 @@ class MusicBox(App):
             judul = e.get("title") or Path(str(e.get("filename", "?"))).name
             tanda = "▶ " if i == sekarang else ("  " if i > sekarang else "· ")
             tabel.add_row(str(i + 1), tanda + str(judul))
-        status.update(f"[b]Radio[/b] · {len(entri)} lagu · "
-                      f"sekarang di nomor {sekarang + 1}"
-                      "  [dim]enter untuk melompat ke lagu[/dim]")
+        status.update(f"[b]Radio[/b] · {len(entri)} {_('songs')} · "
+                      f"{_('now at')} {sekarang + 1}"
+                      f"  [dim]{_('enter jumps to a song')}[/dim]")
         if entri:
             tabel.move_cursor(row=min(sekarang, len(entri) - 1))
 
@@ -2798,7 +2840,7 @@ class MusicBox(App):
         """
         q, n = self._query, self._limit
         self._mencari = True
-        self._status_hasil(f"mencari “{q}”… ({n} hasil teratas)")
+        self._status_hasil(f"{_('searching')} “{q}”… ({n} {_('top results')})")
         self.query_one("#tabs").active = "tab-yt"
         # yt-dlp butuh belasan detik; dijalankan di thread supaya UI tidak beku.
         self.run_worker(lambda: yt_search(q, limit=n), thread=True,
@@ -2838,7 +2880,10 @@ class MusicBox(App):
                     return 0.0
             self.results = sorted(self.results, key=kunci)
         for r in self.results:
-            table.add_row(r["title"], r["uploader"], r["duration"],
+            # ⭳ menandai lagu yang berkasnya sudah ada, supaya tidak perlu
+            # membuka panel kanan cuma untuk tahu.
+            tanda = "⭳ " if self.sudah_diunduh(r) else "  "
+            table.add_row(tanda + r["title"], r["uploader"], r["duration"],
                           fmt_count(r.get("views")))
 
     def on_worker_state_changed(self, event) -> None:
@@ -2881,11 +2926,11 @@ class MusicBox(App):
         self.results = event.worker.result or []
         self.refresh_results_table()
         if self.results:
-            lagi = "  ·  m muat lebih banyak" if self._limit < 100 else ""
-            self._status_hasil(f"{len(self.results)} hasil untuk “{self._query}”"
-                               f"  ·  o urutkan{lagi}")
+            lagi = f"  ·  m {_('load more')}" if self._limit < 100 else ""
+            self._status_hasil(f"{len(self.results)} {_('results for')} “{self._query}”"
+                               f"  ·  o {_('sort by views')}{lagi}")
         else:
-            self._status_hasil(f"tidak ada hasil untuk “{self._query}”")
+            self._status_hasil(f"{_('no results for')} “{self._query}”")
 
     # -- panel info --------------------------------------------------------
 
@@ -2951,7 +2996,7 @@ class MusicBox(App):
         data = getattr(node, "data", None) or {}
         name = data.get("playlist")
         if not name:
-            info.update("[dim]pilih album atau lagu di dalamnya[/dim]")
+            info.update(f"[dim]{_('pick an album or a song inside it')}[/dim]")
             self.show_cover(None)
             return
         if "item" in data:
@@ -3116,38 +3161,31 @@ class MusicBox(App):
     # Petunjuk saat sebuah tab belum punya isi. Panel kosong melompong tidak
     # memberi tahu apa pun tentang apa yang bisa dilakukan di sana.
     PETUNJUK = {
-        "results": ("[b]Cari di YouTube[/b]\n\n"
-                    "Ketik di kotak atas lalu tekan Enter.\n\n"
-                    "[dim]contoh:\n"
-                    "  golden brown 1 hour\n"
-                    "  lofi hip hop\n"
-                    "  nama artis - judul lagu[/dim]\n\n"
-                    "[dim]setelah hasil muncul:\n"
-                    "  enter  putar langsung\n"
-                    "  d      unduh ke ~/Music\n"
-                    "  R      radio dari lagu itu\n"
-                    "  +      masukkan ke antrean\n"
-                    "  m      muat lebih banyak\n"
-                    "  o      urutkan terbanyak ditonton[/dim]"),
-        "queue": ("[b]Antrean kosong[/b]\n\n"
-                  "[dim]tambahkan lagu dengan + dari tab\n"
-                  "Library atau Cari, lalu tekan enter\n"
-                  "di sini untuk memutar semuanya.[/dim]"),
-        "library": ("[b]Library kosong[/b]\n\n"
-                    "[dim]unduh lagu dari tab Cari dengan d,\n"
-                    "atau taruh berkas di ~/Music lalu\n"
-                    "tekan r untuk memindai ulang.[/dim]"),
-        "liked": ("[b]Belum ada lagu disukai[/b]\n\n"
-                  "[dim]tekan l pada lagu mana pun untuk\n"
-                  "menyukainya. dari daftar ini musicbox\n"
-                  "bisa menyusun rekomendasi.[/dim]"),
-        "radio": ("[b]Radio belum menyala[/b]\n\n"
-                  "[dim]pilih lagu di tab Cari lalu tekan R.\n"
-                  "radio menyambung sendiri ke rekomendasi\n"
-                  "berdasarkan lagu itu.[/dim]"),
-        "downloads": ("[b]Belum ada unduhan[/b]\n\n"
-                      "[dim]pilih lagu di tab Cari lalu tekan d.\n"
-                      "f mengganti format mp3 / opus.[/dim]"),
+        "results": lambda: (f"[b]{_('Search YouTube')}[/b]\n\n"
+                            f"{_('Type above and press Enter.')}\n\n"
+                            f"[dim]{_('after results appear:')}\n"
+                            f"  enter  {_('play')}\n"
+                            f"  d      {_('download')}\n"
+                            f"  R      {_('radio')}\n"
+                            f"  +      {_('queue')}\n"
+                            f"  m      {_('load more')}\n"
+                            f"  o      {_('sort by views')}[/dim]"),
+        "queue": lambda: (f"[b]{_('Queue is empty')}[/b]\n\n"
+                          f"[dim]{_('add songs with + from Library or Search,')}\n"
+                          f"{_('then press enter here to play them all.')}[/dim]"),
+        "library": lambda: (f"[b]{_('Library is empty')}[/b]\n\n"
+                            f"[dim]{_('download from Search with d, or put')}\n"
+                            f"{_('files in ~/Music and press r to rescan.')}[/dim]"),
+        "liked": lambda: (f"[b]{_('No liked songs yet')}[/b]\n\n"
+                          f"[dim]{_('press l on any song to like it.')}\n"
+                          f"{_('musicbox builds recommendations from this list.')}[/dim]"),
+        "radio": lambda: (f"[b]{_('Radio is off')}[/b]\n\n"
+                          f"[dim]{_('pick a song in Search and press R.')}\n"
+                          f"{_('radio follows YouTube recommendations')}\n"
+                          f"{_('based on that song.')}[/dim]"),
+        "downloads": lambda: (f"[b]{_('No downloads yet')}[/b]\n\n"
+                              f"[dim]{_('pick a song in Search and press d.')}\n"
+                              f"{_('f switches between mp3 and opus.')}[/dim]"),
     }
 
     def _show_cover_for(self, target: str | None) -> None:
@@ -3211,8 +3249,10 @@ class MusicBox(App):
                 f"{_('duration'):<9}{r['duration']}",
                 f"{_('views'):<9}{fmt_count(r.get('views'))}",
                 f"{_('likes'):<9}{r['likes'] if r['likes'] == '…' else fmt_count(r['likes'])}",
+                *( [f"[b]⭳ {_('already downloaded')}[/b]"]
+                   if self.sudah_diunduh(r) else [] ),
                 "", f"[dim]{yt_url(r['id'])}[/dim]",
-                "", "[dim]enter putar · d unduh · R radio[/dim]",
+                "", f"[dim]enter {_('play')} · d {_('download')} · R {_('radio')}[/dim]",
             ]
         elif table_id == "queue" and 0 <= idx < len(self.queue):
             q = self.queue[idx]
@@ -3235,7 +3275,7 @@ class MusicBox(App):
                      f"{_('source'):<9}{lagu.get('source', '—')}",
                      f"{_('position'):<9}{idx + 1} {_('of')} {len(self.liked)}",
                      "", f"[dim]{lagu.get('target', '')}[/dim]",
-                     "", "[dim]V rekomendasi · R radio · u buang[/dim]"]
+                     "", f"[dim]V {_('recommend')} · R {_('radio')} · u {_('unlike')}[/dim]"]
         elif table_id == "radio" and 0 <= idx < len(self.radio_list):
             e = self.radio_list[idx]
             judul = e.get("title") or Path(str(e.get("filename", "?"))).name
@@ -3244,7 +3284,7 @@ class MusicBox(App):
                      f"{_('position'):<9}{idx + 1} {_('of')} {len(self.radio_list)}",
                      "sumber   radio YouTube",
                      "", f"[dim]{e.get('filename', '')}[/dim]",
-                     "", "[dim]enter melompat ke lagu ini[/dim]"]
+                     "", f"[dim]{_('enter jumps to this song')}[/dim]"]
         elif table_id == "downloads" and 0 <= idx < len(self.downloads):
             d = self.downloads[idx]
             self._show_cover_for(d.get("url"))
@@ -3259,7 +3299,8 @@ class MusicBox(App):
             # Tidak ada baris yang disorot: tampilkan petunjuk tab ini, bukan
             # panel kosong yang tidak menjelaskan apa pun.
             self.show_cover(None)
-            lines = [self.PETUNJUK.get(table_id, "")]
+            petunjuk = self.PETUNJUK.get(table_id)
+            lines = [petunjuk() if petunjuk else ""]
         info.update("\n".join(lines))
 
     # -- antrean -----------------------------------------------------------
@@ -3633,6 +3674,27 @@ class MusicBox(App):
         idx = table.cursor_row
         return self.results[idx] if 0 <= idx < len(self.results) else None
 
+    def sudah_diunduh(self, hasil: dict) -> str | None:
+        """Nama berkas kalau lagu ini sudah ada di ~/Music, None kalau belum.
+
+        Dicocokkan lewat URL yang tercatat di log unduhan lebih dulu — itu
+        tanda paling pasti. Kalau logya sudah terpangkas, judulnya dibandingkan
+        dengan nama berkas di library, karena yt-dlp memakai judul sebagai nama
+        berkas.
+        """
+        url = yt_url(hasil.get("id", ""))
+        for d in self.downloads:
+            if d.get("url") == url and d.get("status") == "selesai":
+                return d.get("title") or url
+        judul = unicodedata.normalize("NFKD", hasil.get("title", "")).strip().lower()
+        if not judul:
+            return None
+        for t in self.library.tracks:
+            nama = unicodedata.normalize("NFKD", Path(t["path"]).stem).strip().lower()
+            if nama == judul:
+                return Path(t["path"]).name
+        return None
+
     async def action_download(self) -> None:
         """Unduh hasil terpilih lewat skrip `music`.
 
@@ -3642,8 +3704,19 @@ class MusicBox(App):
         """
         r = self._selected_result()
         if not r:
-            self.notify("pilih hasil pencarian dulu", timeout=3)
+            self.notify(_("pick a search result first"), timeout=3)
             return
+        # Mengunduh ulang lagu yang sudah ada cuma menghabiskan kuota dan
+        # melahirkan berkas kembar bernama "... (1)".
+        ada = self.sudah_diunduh(r)
+        if ada and self._pending_dl != r.get("id"):
+            self._pending_dl = r.get("id")
+            self.notify(f"{_('Already in your library')}: {ada[:40]}\n"
+                        f"[dim]{_('press d again to download anyway')}[/dim]",
+                        severity="warning", timeout=6)
+            self.set_timer(6.0, lambda: setattr(self, "_pending_dl", None))
+            return
+        self._pending_dl = None
         cmd = [str(HOME / ".local/bin/music"), "-d"]
         if self.dl_format == "opus":
             cmd.insert(1, "-o")

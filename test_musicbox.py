@@ -237,8 +237,23 @@ async def main():
         app.update_info("results", -1)
         await pilot.pause(0.2)
         petunjuk = str(app.query_one("#info-text", Static).content)
-        check("panel kosong memberi petunjuk", "Cari di YouTube" in petunjuk,
+        check("panel kosong memberi petunjuk", "Search YouTube" in petunjuk,
               petunjuk[:26].replace("\n", " "))
+        # Petunjuk panel ikut berganti bahasa, bukan tertinggal satu bahasa.
+        mod.simpan_bahasa("id")
+        check("petunjuk panel ikut diterjemahkan",
+              "Cari di YouTube" in app.PETUNJUK["results"](),
+              app.PETUNJUK["results"]()[:26].replace("\n", " "))
+        mod.simpan_bahasa("en")
+
+        # Lagu yang berkasnya sudah ada tidak boleh terunduh dua kali.
+        lagu0 = app.library.tracks[0]
+        sama = {"id": "a" * 11, "title": Path(lagu0["path"]).stem}
+        beda = {"id": "b" * 11, "title": "lagu yang pasti belum ada xyzzy"}
+        check("lagu yang sudah ada terdeteksi",
+              app.sudah_diunduh(sama) is not None)
+        check("lagu baru tidak salah terdeteksi",
+              app.sudah_diunduh(beda) is None)
 
         # Footer adalah pintu masuk, bukan katalog perintah. Semua aksi
         # pemutaran sudah punya tombol berkotak tepat di atasnya.

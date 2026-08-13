@@ -115,7 +115,7 @@ python3 test_musicbox.py
 ```
 
 Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 122 hal: semua handler keybind ada dan tidak melempar exception,
+Memeriksa 125 hal: semua handler keybind ada dan tidak melempar exception,
 perpindahan tab, antrean, album, panel aksi kontekstual, ekstraksi sampul,
 perintah yang dikirim radio, pendaftaran MPRIS, sel progres unduhan, penguraian
 lirik, dan pemulihan setelah mpv dibunuh di tengah lagu.
@@ -204,6 +204,11 @@ waktu untuk ditemukan:
   tersisa `⚙ Settings` dan `? Help`; sisanya tetap berfungsi dan tetap muncul
   lengkap di layar Help. Menguranginya, bukan mempercantiknya, yang membuat bar
   itu terbaca.
+- **Lagu yang sudah ada ditandai `⭳`, dan unduhan kedua ditahan sekali.**
+  Dicocokkan lewat URL di catatan unduhan lebih dulu — tanda paling pasti — lalu
+  lewat judul yang dinormalkan NFKD terhadap nama berkas di `~/Music`, karena
+  yt-dlp memakai judul sebagai nama berkas. Tekan `d` lagi kalau memang ingin
+  mengunduh ulang.
 - **Satu overlay, bukan empat permukaan.** Panel bantuan bawaan Textual
   menempel di sisi kanan dan berebut ruang dengan panel info — dua kolom teks
   bersebelahan yang sama-sama menuntut dibaca sekaligus, di atas footer dan
