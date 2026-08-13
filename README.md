@@ -1,80 +1,79 @@
+*English · [Bahasa Indonesia](README-ID.md)*
+
 # musicbox
 
-Pemutar musik TUI untuk Linux. Library lokal, pencarian dan unduhan YouTube,
-antrean, album, visualizer, dan sampul sungguhan di terminal.
+A TUI music player for Linux. Local library, YouTube search and downloads,
+queue, albums, visualizer, and real cover art in the terminal.
 
-Warnanya mengikuti skema [Caelestia Shell](https://github.com/caelestia-dots/shell)
-kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
+Colours follow the [Caelestia Shell](https://github.com/caelestia-dots/shell)
+scheme when it is available, and fall back to a built-in palette when it is not.
 
 ```
-┌ Library │ Cari │ Antrean │ Album │ Unduhan ─────────┬──────────────┐
-│                                                      │  [sampul]    │
-│  Judul                        Artis      Durasi      │              │
-│  ...                                                 │  ▶  putar    │
-│                                                      │  ＋ antrean  │
-│                                                      │  ♪  album    │
-├──────────────────────────────────────────────────────┴──────────────┤
-│  ▁▂▄▆█▆▄▂▁  ▂▄▆█▇▅▃▁  (cava)                                        │
-├─────────────────────────────────────────────────────────────────────┤
-│  ▶ Judul lagu      ⏮ ⏸ ⏭ ⏹ ⇄ ↻auto ◫cava  🕪 ▬▬▬▬            3:35 │
-└─────────────────────────────────────────────────────────────────────┘
+┌ Library │ Search │ Queue │ Albums │ Liked │ Radio │ Downloads ─┬──────────┐
+│                                                                │ [cover]  │
+│  Title                          Artist       Duration          │          │
+│  ...                                                           │ ▶ play   │
+│                                                                │ ＋ queue │
+│                                                                │ ♪ album  │
+├────────────────────────────────────────────────────────────────┴──────────┤
+│  ▁▂▄▆█▆▄▂▁  ▂▄▆█▇▅▃▁  (cava)                                              │
+├───────────────────────────────────────────────────────────────────────────┤
+│  ▶ Song title    ⏮ ⏸ ⏭ ⏹ ⇄ ↻auto ◫cava 📻radio ♪lyrics  🕪 ▬▬▬     3:35 │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Fitur
+## Features
 
-- **Library** dari `~/Music` dengan tag dibaca lewat mutagen, di-cache supaya
-  start berikutnya instan.
-- **Cari & putar dari YouTube**, dengan radio yang menyambung ke rekomendasi.
-- **Unduh** ke `~/Music` sebagai mp3 atau opus, lengkap dengan sampul dan
-  metadata tertanam.
-- **Antrean** yang bisa diurutkan, dan **album** tersimpan berbentuk pohon.
-- **Visualizer** membaca keluaran mentah cava.
-- **Sampul sungguhan** lewat sixel, bukan blok ASCII.
-- **Penanda lagu aktif** di daftar library, antrean, dan album.
-- **Lanjut dari terakhir** — lagu dan posisi dipulihkan saat dibuka lagi.
-- **Unduhan bergaya pacman** — bar progres, ukuran, kecepatan, dan sisa waktu,
-  bergerak langsung di tab Unduhan. Lagu yang selesai langsung masuk Library
-  tanpa perlu memindai ulang.
-- **Halaman pemutar penuh** (`L`) — sampul besar, judul, dan lirik tersinkron
-  yang bergulir mengikuti lagu. Lagu yang liriknya tersedia ditandai ♪ di
-  Library.
-- **Pencarian yang bisa dibaca** — jumlah tayangan di tabel, jumlah suka di
-  panel kanan, urutkan menurut terbanyak ditonton (`o`), dan muat lebih banyak
-  hasil (`m`).
-- **Tahan banting**: kalau mpv mati mendadak, musicbox menghidupkannya lagi di
-  lagu dan detik yang sama, bukan membeku diam-diam.
-- **MPRIS bawaan** — musicbox mendaftar sendiri ke D-Bus, jadi tampil di widget
-  media desktop lengkap dengan judul, sampul, dan tombol, tanpa menumpang
-  plugin mpv yang bisa menjatuhkan pemutarnya. Artis dan judul dikirim dalam
-  bentuk bersih, supaya widget yang mencari lirik sendiri bisa menemukannya.
-- **Panel Radio** — daftar lagu yang akan diputar berikutnya saat radio menyala,
-  dengan penanda di bar kendali yang bisa diklik menuju daftar itu.
-- **Lagu disukai** (`l`) dan **rekomendasi** (`V`) yang disusun dari Mix YouTube
-  milik lagu-lagu itu.
-- **Dua bahasa** — Inggris sebagai bawaan, Indonesia lewat `g` atau Settings.
-- **Setelan berkategori** (`,`) — tampilan, bahasa, pemutaran, kontrol, tentang.
-  `?` membuka overlay yang sama langsung di daftar pintasan, yang dibangun dari
-  keybind aslinya sehingga tidak bisa menyimpang dari kenyataan.
+- **Library** from `~/Music`, tags read with mutagen and cached so later starts
+  are instant.
+- **Search and play from YouTube**, with radio that follows recommendations.
+- **Downloads** to `~/Music` as mp3 or opus, with cover art and metadata
+  embedded. Progress shows a pacman-style bar with size, speed, and ETA, and
+  finished songs land in the Library without a manual rescan.
+- **Queue** you can reorder, and **albums** stored as a tree.
+- **Visualizer** reading cava's raw output.
+- **Real cover art** over sixel, not ASCII blocks.
+- **Now-playing markers** across the library, queue, and album lists.
+- **Resume** — the song and position come back when you reopen the app.
+- **Full player page** (`L`) — large cover, title, and synced lyrics that scroll
+  with the song. Songs with lyrics available are marked ♪ in the Library.
+- **Readable search results** — view counts in the table, like counts in the
+  side panel, sort by most viewed (`o`), and load more results (`m`). Songs you
+  already have are marked `⭳`.
+- **Survives a crash**: if mpv dies, musicbox brings it back at the same song
+  and the same second instead of freezing silently.
+- **Built-in MPRIS** — musicbox registers itself on D-Bus, so it appears in
+  desktop media widgets with title, cover art, and controls, without leaning on
+  an mpv plugin that can take the player down with it. Artist and title are sent
+  in cleaned-up form so widgets that look up lyrics themselves can find them.
+- **Radio panel** — what plays next while radio is on, with an indicator in the
+  control bar you can click to jump there.
+- **Liked songs** (`l`) and **recommendations** (`V`) built from the YouTube
+  Mixes of those songs.
+- **Two languages** — English by default, Indonesian via `g` or Settings.
+- **Grouped settings** (`,`) — appearance, language, playback, controls, about.
+  `?` opens the same overlay straight at the shortcut list, which is built from
+  the real keybindings and so cannot drift from reality.
 
-## Kebutuhan
+## Requirements
 
-| Paket | Kegunaan |
+| Package | Purpose |
 |---|---|
-| `mpv` | mesin pemutar (wajib) |
-| `python-textual` | antarmuka (wajib) |
-| `python-mutagen` | baca tag & sampul (wajib) |
-| `yt-dlp` | cari dan unduh dari YouTube |
-| `python-dbus` | tampil di widget media desktop (opsional) |
+| `mpv` | playback engine (required) |
+| `python-textual` | interface (required) |
+| `python-mutagen` | tags and cover art (required) |
+| `yt-dlp` | YouTube search and downloads |
+| `python-dbus` | desktop media widget integration (optional) |
 | `cava` | visualizer |
-| `python-textual-image` | sampul sixel |
+| `python-textual-image` | sixel cover art |
 
-Lirik diambil dari [LRCLIB](https://lrclib.net) — terbuka, tanpa kunci API,
-dan hasilnya disimpan supaya lagu yang sama tidak diminta berulang kali.
+Lyrics come from [LRCLIB](https://lrclib.net) — open, no API key, and cached so
+the same song is never requested twice.
 
-Terminal yang mendukung sixel (mis. foot, kitty, WezTerm) dibutuhkan untuk
-menampilkan sampul. Tanpa itu panel kanan tetap jalan, hanya tanpa gambar.
+A sixel-capable terminal (foot, kitty, WezTerm) is needed for cover art. Without
+one the side panel still works, just without pictures.
 
-## Pasang
+## Install
 
 ```bash
 git clone https://github.com/<user>/musicbox.git
@@ -83,162 +82,152 @@ install -Dm755 bin/musicbox ~/.local/bin/musicbox
 install -Dm755 bin/music    ~/.local/bin/music
 ```
 
-Pastikan `~/.local/bin` ada di `PATH`.
+Make sure `~/.local/bin` is on your `PATH`.
 
-## Pakai
+## Use
 
 ```bash
 musicbox
 ```
 
-Tombol yang tampil di bar bawah adalah kendali pemutaran. Aksi yang bekerja
-pada satu lagu — putar, antrean, album, unduh, hapus — ada di panel kanan dan
-berganti mengikuti tab yang dibuka.
+The buttons in the bottom bar are playback controls. Actions that work on a
+single song — play, queue, album, download, delete — live in the side panel and
+change with the open tab. Press `,` for settings and `?` for every shortcut.
 
-### `music` — pendamping berbasis CLI
+### `music` — the CLI companion
 
-`bin/music` adalah skrip shell terpisah untuk pemakaian cepat tanpa membuka
-antarmuka penuh. musicbox memanggilnya untuk mengunduh, sehingga logika yt-dlp
-hanya ada di satu tempat.
+`bin/music` is a separate shell script for quick use without opening the full
+interface. musicbox calls it to download, so the yt-dlp logic lives in one place.
 
 ```bash
-music -s "judul lagu"      cari, pilih lewat fzf, putar
-music -d "judul lagu"      unduh ke ~/Music
-music -r "judul lagu"      radio, mengikuti rekomendasi
-music -p                   panel tmux: menu + visualizer
+music -s "song title"      search, pick with fzf, play
+music -d "song title"      download to ~/Music
+music -r "song title"      radio, following recommendations
+music -p                   tmux panel: menu + visualizer
 ```
 
-## Uji
+## Tests
 
 ```bash
 python3 test_musicbox.py
 ```
 
-Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 125 hal: semua handler keybind ada dan tidak melempar exception,
-perpindahan tab, antrean, album, panel aksi kontekstual, ekstraksi sampul,
-perintah yang dikirim radio, pendaftaran MPRIS, sel progres unduhan, penguraian
-lirik, dan pemulihan setelah mpv dibunuh di tengah lagu.
+Uses Textual's own `run_test()`, so no real terminal is needed. It checks 125
+things: every keybinding has a handler and raises nothing, tab switching, the
+queue, albums, the contextual action panel, cover extraction, the commands radio
+sends, MPRIS registration, the download progress cell, lyrics parsing, and
+recovery after mpv is killed mid-song.
 
-Suite ini sengaja tidak menyentuh jaringan supaya cepat dan tidak bergantung
-pada YouTube. Jalur berjaringan — pencarian, streaming, radio, dan unduhan mp3
-serta opus lengkap dengan pemeriksaan codec, sampul, dan metadata — diuji
-terpisah dan pernah dijalankan penuh sebelum rilis.
+The suite deliberately stays off the network so it is fast and does not depend on
+YouTube. The networked paths — search, streaming, radio, and real mp3 and opus
+downloads with codec, cover art, and metadata verified — are tested separately
+and were run in full before release.
 
-## Catatan teknis
+## Design notes
 
-Beberapa keputusan yang tidak terlihat dari luar, dicatat karena sempat memakan
-waktu untuk ditemukan:
+Decisions that are invisible from the outside, written down because each one
+took a while to find:
 
-- **mpv dijalankan dalam mode idle** dan dikendalikan lewat JSON IPC, bukan
-  di-exec per lagu. Prosesnya tetap hidup di antara lagu sehingga status bisa
-  dipantau dan dikendalikan kapan saja.
-- **Instans tunggal dikunci.** Semua instans memakai socket mpv yang sama;
-  instans kedua akan menimpa socket milik yang pertama dan membuatnya kehilangan
-  kendali, selain berebut audio dan mendaftarkan MPRIS ganda.
-- **Sampul di file Ogg/Opus** disimpan sebagai blok Picture FLAC ter-base64 di
-  dalam Vorbis comment `metadata_block_picture` — bukan `APIC` (ID3), `covr`
-  (MP4), atau `.pictures` (FLAC). Keempat jalur ditangani.
-- **`SixelImage` dipaksa** alih-alih `AutoImage`; deteksi otomatis bisa jatuh ke
-  renderer blok Unicode yang hasilnya kasar.
-- **`background: transparent`** di semua widget, dan tema `ansi-dark`. Tema
-  bawaan Textual mengecat latar solid sehingga transparansi terminal hilang.
-- **`yt-dlp --print` tidak menafsirkan `\t`** — pemisah kolom harus berupa
-  karakter tab sungguhan.
-- **Radio harus meminta `yes-playlist`.** mpv memberi `--no-playlist` ke yt-dlp
-  secara bawaan, jadi URL Mix (`&list=RD…`) hanya memuat lagu pertamanya —
-  radio yang berhenti setelah satu lagu, persis kebalikan dari gunanya. Terukur
-  pada satu Mix: **1 lagu tanpa opsi ini, 509 dengan.** Opsinya dikirim per-file
-  lewat `loadfile`, bukan ke seluruh proses mpv, supaya URL biasa yang kebetulan
-  membawa `list=` tidak ikut berubah perilakunya.
-- **MPRIS didaftarkan sendiri, plugin mpv-mpris tidak dipakai.** Versi 1.2
-  (rilis 2023) di atas mpv 0.41 sesekali membunuh mpv saat lagu berpindah:
-  thread `cplugin/mpris2` menyusun sinyal `PropertiesChanged` dari string
-  metadata yang sedang diganti mpv, GLib mendapati UTF-8 tak sah di
-  `append_value_to_blob`, lalu memanggil `abort()`. Prosesnya jadi zombie dan
-  musik berhenti di tengah album, sementara antarmukanya tetap memperlihatkan
-  judul terakhir — terlihat seperti aplikasi yang macet padahal yang mati ada di
-  bawahnya. Terukur di sini: **3 dari 30 perpindahan lagu gagal dengan plugin,
-  0 dari 30 tanpa.** Karena ikon di widget desktop tetap diinginkan, musicbox
-  mendaftar sendiri ke D-Bus lewat `python-dbus`, di thread terpisah dengan main
-  loop GLib. Teks dibersihkan dulu (`dbus_safe`) supaya kesalahan yang sama
-  tidak berpindah tangan. Kalau `python-dbus` tidak ada, musicbox tetap jalan —
-  hanya tanpa ikon.
-- **Menahan diri dari `--script=` saja tidak cukup.** Paket mpv-mpris memasang
-  symlink di `/etc/mpv/scripts/mpris.so`, dan mpv memuat isi direktori itu untuk
-  setiap pemakaian tanpa diminta. Yang benar-benar mematikannya adalah
-  `--load-scripts=no`. Sebelum ini ketahuan, plugin yang "sudah dimatikan"
-  ternyata masih ikut termuat dan masih menjatuhkan mpv.
-- **Kurung siku tidak dipakai untuk bar progres.** DataTable merender isinya
-  sebagai markup Rich, dan `[####----]` ditelan mentah-mentah sebagai tag —
-  barnya hilang sama sekali dari layar padahal datanya ada. Bar sekarang
-  memakai `━` dan `─`.
-- **Progres unduhan dibaca dari angka, bukan kalimat.** `music` memanggil
-  yt-dlp dengan `--progress-template` saat keluarannya bukan terminal, jadi
-  musicbox menerima byte dan detik mentah lalu menghitung sendiri persen,
-  kecepatan, dan sisa waktunya. Menebak dari teks untuk manusia rapuh: formatnya
-  berubah-ubah dan kadang menulis "Unknown" di tengah unduhan yang sehat.
-- **Judul dinormalkan dengan NFKD sebelum mencari lirik.** Kanal YouTube gemar
-  memakai huruf hias di luar ASCII — "𝑮𝒐𝒍𝒅𝒆𝒏 𝑩𝒓𝒐𝒘𝒏" terbaca seperti kata biasa
-  oleh mata, tapi tidak cocok dengan apa pun saat dicari.
-- **`like_count` tidak ikut pencarian.** Ia menuntut ekstraksi penuh tiap video,
-  sekitar lima detik per judul — dua menit hanya untuk mengisi satu layar hasil.
-  `view_count` gratis dari `--flat-playlist`, jadi tayangan masuk tabel dan suka
-  diambil belakangan hanya untuk baris yang benar-benar disorot.
-- **Ukuran huruf milik terminal, bukan aplikasi.** foot tidak menyediakan
-  escape sequence untuk mengubahnya, jadi musicbox tidak mungkin melakukannya
-  dari dalam — pakai `Ctrl+plus`, `Ctrl+minus`, `Ctrl+0`, atau `Ctrl+scroll`.
-  Yang bisa diatur musicbox adalah kerapatan tampilan (`+` / `-`): tinggi
-  sampul, tinggi visualizer, dan padding.
-- **Rekomendasi tidak berpura-pura jadi algoritma.** Yang dipakai adalah daftar
-  Mix YouTube dari lagu-lagu yang disukai, dibuang yang sudah dimiliki, lalu
-  diurutkan menurut jumlah tayangan. Itu "yang menyukai ini biasanya juga
-  mendengar itu" versi YouTube — berguna, dan jujur soal asalnya.
-- **IPC mpv sekarang bisa bertanya, bukan cuma menyuruh.** Jawaban datang
-  bercampur dengan aliran event, jadi tiap permintaan dicocokkan lewat
-  `request_id`; tanpa itu yang terbaca bisa peristiwa lain yang kebetulan lewat
-  lebih dulu. Panel Radio membaca daftar putar mpv lewat jalur ini.
-- **Footer adalah pintu masuk, bukan katalog perintah.** Sebelumnya ia
-  mencetak sebelas pintasan yang semuanya sudah punya tombol berkotak tepat di
-  atasnya — dua kali kerja untuk mata, dan meluber di terminal sempit. Kini
-  tersisa `⚙ Settings` dan `? Help`; sisanya tetap berfungsi dan tetap muncul
-  lengkap di layar Help. Menguranginya, bukan mempercantiknya, yang membuat bar
-  itu terbaca.
-- **Lagu yang sudah ada ditandai `⭳`, dan unduhan kedua ditahan sekali.**
-  Dicocokkan lewat URL di catatan unduhan lebih dulu — tanda paling pasti — lalu
-  lewat judul yang dinormalkan NFKD terhadap nama berkas di `~/Music`, karena
-  yt-dlp memakai judul sebagai nama berkas. Tekan `d` lagi kalau memang ingin
-  mengunduh ulang.
-- **Satu overlay, bukan empat permukaan.** Panel bantuan bawaan Textual
-  menempel di sisi kanan dan berebut ruang dengan panel info — dua kolom teks
-  bersebelahan yang sama-sama menuntut dibaca sekaligus, di atas footer dan
-  command palette yang juga minta perhatian. `?` sekarang bermuara ke overlay
-  Setelan yang sama, langsung di kategori Kontrol. Yang sedang dibaca cuma satu
-  hal pada satu waktu.
-- **Label footer tidak menyebut tombolnya.** Textual sudah mencetak tombol di
-  depan deskripsi; label yang ikut menyebutnya menghasilkan `? ? Help`.
-- **Setelan dikelompokkan sejak awal.** Satu daftar panjang akan terus memanjang
-  tiap ada opsi baru, dan yang jarang dipakai ikut menghalangi yang sering.
-  Kategori di kiri membuat tambahan berikutnya masuk ke kelompoknya.
-- **Uji memeriksa keybind bentrok.** `plus` sempat terikat dua kali — volume dan
-  kerapatan — dan yang belakangan mati diam-diam tanpa pesan apa pun. Suite
-  sekarang menolak keadaan itu, sekaligus memastikan tiap aksi yang diikat
-  benar-benar punya handler.
-- **`MUSICBOX_AO` memaksa keluaran audio.** Dipakai pengujian dengan nilai
-  `null`. Tanpa itu suite berebut perangkat audio dengan musicbox yang sedang
-  benar-benar dipakai mendengarkan musik, mpv gagal membuka stream
-  (`Device or resource busy`), lagunya tidak jadi diputar, dan hasil ujinya
-  menyesatkan — kegagalan yang tampak seperti bug aplikasi padahal bukan.
-- **mpv diawasi dan dihidupkan ulang.** Karena kematian seperti di atas bisa
-  datang dari mana saja — plugin pihak ketiga, OOM killer, dekoder yang menyerah
-  — proses mpv diperiksa tiap detik. Kalau mati, ia dibangkitkan lagi dengan
-  playlist, posisi lagu, detik, dan status loop yang sama.
-- **Tiap sambungan IPC punya nomor generasi.** Setelah mpv dihidupkan ulang,
-  task pembaca yang lama harus benar-benar berhenti. Kalau tidak, dua task
-  memanggil `readline()` pada `StreamReader` yang sama, asyncio menolaknya, dan
-  pembaruan properti berhenti mengalir — macet yang sama persis, hanya
-  penyebabnya berpindah ke dalam aplikasi sendiri.
+- **mpv runs in idle mode** and is driven over JSON IPC rather than exec'd per
+  song. The process stays alive between songs, so its state can be watched and
+  controlled at any time.
+- **Only one instance may run.** Every instance uses the same mpv socket; a
+  second one overwrites the first's socket and leaves it without control, on top
+  of fighting over audio and registering MPRIS twice.
+- **Cover art in Ogg/Opus files** is stored as a base64 FLAC Picture block inside
+  the `metadata_block_picture` Vorbis comment — not `APIC` (ID3), `covr` (MP4),
+  or `.pictures` (FLAC). All four paths are handled.
+- **`SixelImage` is forced** instead of `AutoImage`; auto-detection can fall back
+  to a Unicode block renderer whose output is coarse.
+- **`background: transparent` everywhere**, with the `ansi-dark` theme. Textual's
+  default themes paint a solid background, which destroys terminal transparency.
+- **`yt-dlp --print` does not interpret `\t`** — the column separator has to be a
+  real tab character.
+- **Radio has to ask for `yes-playlist`.** mpv passes `--no-playlist` to yt-dlp by
+  default, so a Mix URL (`&list=RD…`) loads only its first song — radio that
+  stops after one track, the exact opposite of the point. Measured on one Mix:
+  **1 song without the option, 509 with it.** It is sent per-file through
+  `loadfile` rather than to the whole mpv process, so ordinary URLs that happen
+  to carry `list=` keep their behaviour.
+- **MPRIS is registered by musicbox itself; the mpv-mpris plugin is not used.**
+  Version 1.2 (released 2023) on mpv 0.41 occasionally kills mpv during a track
+  change: the `cplugin/mpris2` thread builds a `PropertiesChanged` signal from
+  metadata strings mpv is in the middle of replacing, GLib finds invalid UTF-8 in
+  `append_value_to_blob`, and calls `abort()`. The process becomes a zombie and
+  the music stops mid-album while the interface still shows the last title — it
+  looks like a frozen app when what died is underneath it. Measured here: **3 of
+  30 track changes failed with the plugin, 0 of 30 without.** Since the desktop
+  icon was still wanted, musicbox registers on D-Bus itself through
+  `python-dbus`, on its own thread with a GLib main loop. Text is sanitised first
+  (`dbus_safe`) so the same mistake does not simply change hands. Without
+  `python-dbus` musicbox still runs — just without the icon.
+- **Declining to pass `--script=` is not enough.** The mpv-mpris package installs
+  a symlink at `/etc/mpv/scripts/mpris.so`, and mpv loads that directory for
+  every invocation. `--load-scripts=no` is what actually disables it. Before this
+  was found, the "disabled" plugin was still being loaded and still taking mpv
+  down.
+- **Square brackets are not used for the progress bar.** DataTable renders its
+  contents as Rich markup, and `[####----]` is swallowed whole as a tag — the bar
+  vanished from the screen even though the data was there. The bar uses `━` and
+  `─` now.
+- **Download progress is read from numbers, not prose.** `music` calls yt-dlp
+  with `--progress-template` when its output is not a terminal, so musicbox gets
+  raw bytes and seconds and computes percent, speed, and ETA itself. Guessing
+  from human-readable text is fragile: the format shifts and it sometimes prints
+  "Unknown" in the middle of a perfectly healthy download.
+- **Titles are NFKD-normalised before looking up lyrics.** YouTube channels love
+  decorative non-ASCII letters — "𝑮𝒐𝒍𝒅𝒆𝒏 𝑩𝒓𝒐𝒘𝒏" reads like an ordinary word to the
+  eye but matches nothing in a search.
+- **`like_count` is not part of search.** It demands a full extraction per video,
+  around five seconds a title — two minutes just to fill one screen of results.
+  `view_count` comes free with `--flat-playlist`, so views go in the table and
+  likes are fetched afterwards only for the row actually highlighted.
+- **Songs you already have are marked `⭳`, and a second download is held once.**
+  Matched first by the URL in the download log — the most reliable signal — then
+  by NFKD-normalised title against the filenames in `~/Music`, since yt-dlp uses
+  the title as the filename. Press `d` again if you really do want another copy.
+- **One overlay, not four surfaces.** Textual's built-in help panel docks to the
+  right and competes with the info panel — two columns of text side by side, both
+  demanding to be read, on top of a footer and a command palette also asking for
+  attention. `?` now leads to the same Settings overlay, straight at the Controls
+  category. Only one thing is being read at a time.
+- **The command palette is switched off.** It lists Textual's own internal
+  commands — Maximize, Screenshot, Theme — which have nothing to do with playing
+  music, and it was a fourth surface offering them.
+- **Footer labels do not name their own key.** Textual already prints the key
+  ahead of the description; a label that names it too renders as `? ? Help`.
+- **Settings were grouped from the start.** A single long list only grows with
+  every new option, and the rarely-used ones end up in the way of the frequent
+  ones.
+- **The test suite rejects conflicting keybindings.** `plus` was once bound
+  twice — volume and density — and the later one died silently with no message at
+  all. The suite now refuses that state, and checks that every bound action
+  actually has a handler.
+- **`MUSICBOX_AO` forces the audio output.** Tests use `null`. Without it the
+  suite fights the musicbox you are actually listening to for the audio device,
+  mpv fails to open a stream (`Device or resource busy`), the song never plays,
+  and the results mislead — a failure that looks exactly like an application bug
+  and is not.
+- **mpv is watched and restarted.** Because a death like the one above can come
+  from anywhere — a third-party plugin, the OOM killer, a decoder giving up — the
+  process is checked every second. If it died, it comes back with the same
+  playlist, song, second, and loop setting.
+- **Every IPC connection carries a generation number.** After mpv is restarted the
+  old reader task has to actually stop. Otherwise two tasks call `readline()` on
+  the same `StreamReader`, asyncio refuses, and property updates stop flowing —
+  the same freeze, with the cause merely moved inside the application.
+- **mpv IPC can ask, not only tell.** Replies arrive mixed into the event stream,
+  so each request is matched by `request_id`; without that, what gets read may be
+  some other event that happened to arrive first. The Radio panel reads mpv's
+  playlist through this path.
+- **Recommendations do not pretend to be an algorithm.** They come from the
+  YouTube Mixes of the songs you liked, minus what you already have, sorted by
+  view count. That is YouTube's "people who liked this also listened to that" —
+  useful, and honest about where it comes from.
+- **Panel hints are lambdas, not strings.** As plain strings they are evaluated
+  when the module loads and freeze in whichever language was active at startup,
+  so switching language would not change them.
 
-## Lisensi
+## Licence
 
 MIT

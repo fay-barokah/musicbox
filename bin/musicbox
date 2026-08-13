@@ -1149,6 +1149,10 @@ TERJEMAHAN = {
         "press d again to download anyway":
             "tekan d sekali lagi untuk tetap mengunduh",
         "pick a search result first": "pilih hasil pencarian dulu",
+        "nothing playing": "tidak ada yang diputar",
+        "auto": "auto", "cava": "cava",
+        "search YouTube, then press Enter…": "cari di YouTube lalu tekan Enter…",
+        "e.g. late night": "mis. santai malam",
         "Change": "Ubah", "Density": "Kerapatan",
         "Download format": "Format unduhan",
         "All shortcuts": "Semua pintasan",
@@ -1568,7 +1572,7 @@ class NowPlaying(Static):
     """Bar bawah: judul, kendali, waktu, dan posisi yang bisa diklik."""
 
     def compose(self) -> ComposeResult:
-        yield Static("tidak ada yang diputar", id="np-title")
+        yield Static(_("nothing playing"), id="np-title")
         with Horizontal(id="np-controls"):
             yield TransportButton("⏮", "prev", classes="tbtn")
             yield TransportButton("⏸", "pause", id="btn-pause", classes="tbtn")
@@ -1577,13 +1581,15 @@ class NowPlaying(Static):
             yield TransportButton("⇄", "shuffle", classes="tbtn")
             # Label tombol status ikut berubah, bukan cuma warnanya, supaya
             # kondisi hidup/mati terbaca tanpa harus menebak dari warna.
-            yield TransportButton("↻ auto", "autoplay", id="btn-auto", classes="tbtn wide on")
-            yield TransportButton("◫ cava", "cava", id="btn-cava", classes="tbtn wide on")
+            yield TransportButton("↻ " + _("auto"), "autoplay", id="btn-auto",
+                                  classes="tbtn wide on")
+            yield TransportButton("◫ " + _("cava"), "cava", id="btn-cava",
+                                  classes="tbtn wide on")
             # Penanda mode radio: mati saat memutar biasa, menyala dan bisa
             # diklik saat radio jalan — kliknya membuka daftar lagu berikutnya.
             yield TransportButton("📻 " + _("radio"), "radio_panel", id="btn-radio",
                                   classes="tbtn wide off")
-            yield TransportButton("♪ lirik", "player", classes="tbtn wide")
+            yield TransportButton("♪ " + _("lyrics"), "player", classes="tbtn wide")
             yield Static("🕪", id="vol-label")
             yield VolumeBar(id="vol-bar")
         with Horizontal(id="np-row"):
@@ -1600,7 +1606,7 @@ class PlaylistNameScreen(ModalScreen[str | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
             yield Static("Nama album baru")
-            yield Input(placeholder="mis. santai malam", id="pl-name")
+            yield Input(placeholder=_("e.g. late night"), id="pl-name")
 
     def on_mount(self) -> None:
         self.query_one("#pl-name", Input).focus()
@@ -1718,7 +1724,7 @@ class PlayerScreen(ModalScreen[None]):
         app = self.app
         info = app.now_playing_info()
         st = app.player.state
-        judul = info.get("title") or st.get("title") or "tidak ada yang diputar"
+        judul = info.get("title") or st.get("title") or _("nothing playing")
         self.query_one("#player-judul", Static).update(f"[b]{judul}[/b]")
         self.query_one("#player-artis", Static).update(info.get("artist") or "—")
         sumber = st.get("path") or ""
@@ -1972,6 +1978,8 @@ class MusicBox(App):
     # sehingga transparansi terminal hilang. `ansi-dark` memakai warna ANSI
     # terminal dan tidak mengecat latar — itulah yang membuat wallpaper tembus.
     theme = "ansi-dark"
+    # Ctrl+P dimatikan sekalian, bukan cuma disembunyikan dari footer.
+    ENABLE_COMMAND_PALETTE = False
 
     # Matikan seleksi teks. Di btop bar posisi tidak bisa di-blok; tanpa ini
     # klik-seret pada seek bar malah menyorot teks alih-alih menggeser lagu.
@@ -2330,7 +2338,7 @@ class MusicBox(App):
                     with TabPane(_("Library"), id="tab-lib"):
                         yield DataTable(id="library", cursor_type="row", zebra_stripes=False)
                     with TabPane(_("Search"), id="tab-yt"):
-                        yield Input(placeholder="cari di YouTube lalu tekan Enter…",
+                        yield Input(placeholder=_("search YouTube, then press Enter…"),
                                     id="yt-input")
                         # Status pencarian ditulis di sini, bukan sebagai toast
                         # di pojok: pencarian makan belasan detik dan mata
@@ -2362,7 +2370,12 @@ class MusicBox(App):
                     yield Vertical(id="song-actions")
             yield CavaBars(id="cava")
             yield NowPlaying()
-        yield Footer()
+        # Palette bawaan Textual dimatikan. Isinya perintah internal framework
+        # — Maximize, Screenshot, Theme, Keys — bukan perintah musicbox, dan ia
+        # menjadi permukaan keempat yang menawarkan hal-hal yang tidak ada
+        # hubungannya dengan memutar musik. Setelan dan daftar pintasan sudah
+        # menampung semuanya.
+        yield Footer(show_command_palette=False)
 
     async def on_mount(self) -> None:
         table = self.query_one("#library", DataTable)
@@ -2794,7 +2807,7 @@ class MusicBox(App):
             self._np_cache = {}
             self._tandai_lirik()
             self._sync_radio_button()
-        title = st.get("title") or "tidak ada yang diputar"
+        title = st.get("title") or _("nothing playing")
         if st.get("pause") and st.get("path"):
             title = f"⏸  {title}"
         elif st.get("path"):
@@ -3838,7 +3851,7 @@ class MusicBox(App):
     def action_toggle_autoplay(self) -> None:
         self.autoplay = not self.autoplay
         btn = self.query_one("#btn-auto", TransportButton)
-        btn.update("↻ auto" if self.autoplay else "↻ off")
+        btn.update("↻ " + (_("auto") if self.autoplay else _("off")))
         btn.set_class(self.autoplay, "on")
         btn.set_class(not self.autoplay, "off")
         self.notify("autoplay on" if self.autoplay else "autoplay off", timeout=2)
@@ -3853,7 +3866,7 @@ class MusicBox(App):
         btn = self.query_one("#btn-cava", TransportButton)
         self.cava_on = not self.cava_on
         cava.display = self.cava_on
-        btn.update("◫ cava" if self.cava_on else "◫ off")
+        btn.update("◫ " + (_("cava") if self.cava_on else _("off")))
         btn.set_class(self.cava_on, "on")
         btn.set_class(not self.cava_on, "off")
         self.call_after_refresh(self._fit_info_panel)
