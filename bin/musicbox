@@ -1087,7 +1087,27 @@ TERJEMAHAN = {
         "Stop": "Stop", "Autoplay": "Autoplay", "Visualizer": "Visualizer",
         "Quit": "Keluar", "Shuffle": "Acak", "Lyrics": "Lirik",
         "Like": "Suka", "Back": "Kembali", "Zoom in": "Perbesar",
-        "Zoom out": "Perkecil",
+        "Zoom out": "Perkecil", "Rescan": "Pindai ulang",
+        "Cancel": "Batal", "Settings": "Setelan", "Help": "Bantuan",
+        "Appearance": "Tampilan", "Language": "Bahasa",
+        "Playback": "Pemutaran", "Controls": "Kontrol",
+        "About": "Tentang", "Palette": "Palet",
+        "on": "hidup", "off": "mati",
+        "compact": "padat", "normal": "normal", "roomy": "lapang",
+        "Dequeue": "Keluarkan", "Move up": "Naikkan",
+        "Move down": "Turunkan", "Delete album": "Hapus album",
+        "Remove from album": "Keluarkan dari album",
+        "Download": "Unduh", "Load more": "Muat lagi", "Sort": "Urutkan",
+        "Unlike": "Buang suka", "Recommend": "Rekomendasi",
+        "Delete": "Hapus", "Enqueue": "Antrekan",
+        "Play queue": "Putar antrean", "Add to album": "Tambah ke album",
+        "Change": "Ubah", "Density": "Kerapatan",
+        "Download format": "Format unduhan",
+        "All shortcuts": "Semua pintasan",
+        "Settings file": "Berkas setelan",
+        "Lyrics source": "Sumber lirik",
+        "follows wallpaper": "mengikuti wallpaper",
+        "built-in": "bawaan",
     },
 }
 _BAHASA = "en"
@@ -1527,7 +1547,7 @@ class NowPlaying(Static):
 class PlaylistNameScreen(ModalScreen[str | None]):
     """Dialog kecil untuk memberi nama album."""
 
-    BINDINGS = [Binding("escape", "cancel", "Batal")]
+    BINDINGS = [Binding("escape", "cancel", _("Cancel"))]
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
@@ -1620,8 +1640,8 @@ class PlayerScreen(ModalScreen[None]):
     """
 
     BINDINGS = [
-        Binding("escape", "close", "Kembali"),
-        Binding("q", "close", "Kembali"),
+        Binding("escape", "close", _("Back")),
+        Binding("q", "close", _("Back")),
         Binding("space", "playpause", _("Play/Pause")),
         Binding("n", "next", _("Next")),
         Binding("p", "prev", _("Previous")),
@@ -1706,6 +1726,149 @@ class PlayerScreen(ModalScreen[None]):
         await self.app.player.seek(5)
 
 
+class SettingRow(Static):
+    """Satu baris setelan yang bisa diklik: label di kiri, nilai di kanan."""
+
+    class Ubah(Message):
+        def __init__(self, kunci: str) -> None:
+            self.kunci = kunci
+            super().__init__()
+
+    def __init__(self, kunci: str, label: str, nilai: str,
+                 bisa_diubah: bool = True, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.kunci = kunci
+        self.label = label
+        self.nilai = nilai
+        self.bisa_diubah = bisa_diubah
+        if bisa_diubah:
+            self.add_class("bisa")
+
+    def render(self) -> str:
+        # Titik-titik penghubung dipakai supaya mata bisa menyusuri dari nama
+        # setelan ke nilainya tanpa tersesat, sekalipun panelnya melebar.
+        lebar = max(20, (self.size.width or 46) - 2)
+        isi = f"{self.label}  "
+        kanan = f"  {self.nilai}"
+        titik = "·" * max(1, lebar - len(isi) - len(kanan))
+        return f"{isi}[dim]{titik}[/dim]{kanan}"
+
+    def on_click(self) -> None:
+        if self.bisa_diubah:
+            self.post_message(self.Ubah(self.kunci))
+
+
+class SettingsScreen(ModalScreen[None]):
+    """Setelan, dikelompokkan.
+
+    Satu daftar panjang akan terus memanjang tiap kali ada opsi baru, dan
+    opsi yang jarang dipakai ikut menghalangi yang sering. Kategori di kiri
+    membuat penambahan berikutnya masuk ke kelompoknya, bukan ke ujung bawah.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", _("Back")),
+        Binding("q", "close", _("Back")),
+        Binding("enter", "ubah", _("Change")),
+    ]
+
+    KATEGORI = ["Appearance", "Language", "Playback", "Controls", "About"]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.kategori = "Appearance"
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="setel-kotak"):
+            yield Static(f"⚙  {_('Settings')}", id="setel-judul")
+            with Horizontal(id="setel-isi"):
+                with Vertical(id="setel-nav"):
+                    for k in self.KATEGORI:
+                        yield SettingRow(f"nav:{k}", _(k), "", id=f"nav-{k}",
+                                         classes="nav")
+                with Vertical(id="setel-opsi"):
+                    pass
+            yield Static(f"[dim]enter {_('Change')} · esc {_('Back')}[/dim]",
+                         id="setel-bantuan")
+
+    def on_mount(self) -> None:
+        self._gambar()
+
+    # -- isi tiap kategori --------------------------------------------------
+
+    def _opsi(self) -> list[tuple[str, str, str, bool]]:
+        app = self.app
+        k = self.kategori
+        if k == "Appearance":
+            return [
+                ("cava", _("Visualizer"), _("on") if app.cava_on else _("off"), True),
+                ("zoom", _("Density"),
+                 _(("compact", "normal", "roomy")[app.zoom]), True),
+                ("palette", _("Palette"),
+                 _("follows wallpaper") if SCHEME_FILE.exists() else _("built-in"),
+                 False),
+            ]
+        if k == "Language":
+            return [("lang", _("Language"),
+                     "English" if _BAHASA == "en" else "Indonesia", True)]
+        if k == "Playback":
+            return [
+                ("autoplay", _("Autoplay"),
+                 _("on") if app.autoplay else _("off"), True),
+                ("format", _("Download format"), app.dl_format, True),
+            ]
+        if k == "Controls":
+            return [("help", _("All shortcuts"), "→", True)]
+        return [
+            ("v", "musicbox", "1.0", False),
+            ("cfg", _("Settings file"), str(STATE_DIR).replace(str(HOME), "~"), False),
+            ("lyr", _("Lyrics source"), "lrclib.net", False),
+            ("mpris", "MPRIS", _("on") if getattr(app, "mpris", None)
+             and app.mpris.aktif else _("off"), False),
+        ]
+
+    def _gambar(self) -> None:
+        for k in self.KATEGORI:
+            self.query_one(f"#nav-{k}").set_class(k == self.kategori, "terpilih")
+        kotak = self.query_one("#setel-opsi", Vertical)
+        kotak.remove_children()
+        for kunci, label, nilai, bisa in self._opsi():
+            kotak.mount(SettingRow(kunci, label, nilai, bisa, classes="opsi"))
+
+    # -- interaksi -----------------------------------------------------------
+
+    async def on_setting_row_ubah(self, pesan: SettingRow.Ubah) -> None:
+        await self._terapkan(pesan.kunci)
+
+    async def action_ubah(self) -> None:
+        pass
+
+    async def _terapkan(self, kunci: str) -> None:
+        app = self.app
+        if kunci.startswith("nav:"):
+            self.kategori = kunci[4:]
+            self._gambar()
+            return
+        if kunci == "cava":
+            app.action_toggle_cava()
+        elif kunci == "zoom":
+            app._zoom(1 if app.zoom < 2 else -2)
+        elif kunci == "lang":
+            app.action_bahasa()
+        elif kunci == "autoplay":
+            app.action_toggle_autoplay()
+        elif kunci == "format":
+            app.action_toggle_format()
+        elif kunci == "help":
+            self.dismiss(None)
+            app.action_help()
+            return
+        self._gambar()
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class AlbumPicker(ModalScreen[str | None]):
     """Pilih album tujuan, atau buat baru.
 
@@ -1714,7 +1877,7 @@ class AlbumPicker(ModalScreen[str | None]):
     langsung dari Library/Cari sehingga alurnya satu tarikan napas.
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Batal")]
+    BINDINGS = [Binding("escape", "cancel", _("Cancel"))]
 
     def __init__(self, albums: list[str]) -> None:
         super().__init__()
@@ -1889,6 +2052,23 @@ class MusicBox(App):
         content-align: center middle;
     }
 
+    SettingsScreen { align: center middle; background: $cae-surface 80%; }
+    #setel-kotak {
+        width: 78;
+        height: 24;
+        background: $cae-container;
+        border: round $cae-primary;
+        padding: 1 2;
+    }
+    #setel-judul { height: 1; color: $cae-primary; text-style: bold; }
+    #setel-isi { height: 1fr; padding: 1 0 0 0; }
+    #setel-nav { width: 22; height: 1fr; border-right: solid $cae-outline; }
+    #setel-opsi { width: 1fr; height: 1fr; padding: 0 0 0 2; }
+    #setel-bantuan { height: 1; color: $cae-on-variant; }
+    SettingRow { height: 1; color: $cae-on-variant; background: transparent; }
+    SettingRow.bisa:hover { color: $cae-primary; background: $cae-container-high; }
+    SettingRow.terpilih { color: $cae-primary; text-style: bold; }
+
     PlayerScreen { align: center middle; background: $cae-surface 85%; }
     #layar-player {
         width: 100%;
@@ -1971,41 +2151,41 @@ class MusicBox(App):
     """
 
     BINDINGS = [
-        Binding("space", "toggle_pause", _("Play/Pause")),
-        Binding("n", "next", _("Next")),
-        Binding("p", "prev", _("Previous")),
-        Binding("s", "stop", _("Stop")),
+        Binding("space", "toggle_pause", _("Play/Pause"), show=False),
+        Binding("n", "next", _("Next"), show=False),
+        Binding("p", "prev", _("Previous"), show=False),
+        Binding("s", "stop", _("Stop"), show=False),
         Binding("right", "seek_fwd", "+5s", show=False),
         Binding("left", "seek_back", "-5s", show=False),
         Binding("plus,equals_sign", "vol_up", "Vol+", show=False),
         Binding("minus", "vol_down", "Vol-", show=False),
-        Binding("z", "shuffle", _("Shuffle")),
-        Binding("a", "toggle_autoplay", _("Autoplay")),
-        Binding("c", "toggle_cava", _("Visualizer")),
-        Binding("d", "download", show=False, description="Unduh"),
+        Binding("z", "shuffle", _("Shuffle"), show=False),
+        Binding("a", "toggle_autoplay", _("Autoplay"), show=False),
+        Binding("c", "toggle_cava", _("Visualizer"), show=False),
+        Binding("d", "download", show=False, description=_("Download")),
         Binding("f", "toggle_format", show=False, description="mp3/opus"),
         Binding("R", "radio", show=False, description="Radio"),
-        Binding("m", "more_results", show=False, description="Muat lagi"),
-        Binding("o", "sort_results", show=False, description="Urutkan"),
-        Binding("L", "player", _("Lyrics")),
-        Binding("l", "like", _("Like")),
-        Binding("u", "unlike", show=False, description="Buang suka"),
-        Binding("V", "rekomendasi", show=False, description="Rekomendasi"),
+        Binding("m", "more_results", show=False, description=_("Load more")),
+        Binding("o", "sort_results", show=False, description=_("Sort")),
+        Binding("L", "player", _("Lyrics"), show=False),
+        Binding("l", "like", _("Like"), show=False),
+        Binding("u", "unlike", show=False, description=_("Unlike")),
+        Binding("V", "rekomendasi", show=False, description=_("Recommend")),
+        Binding("comma", "settings", "⚙ " + _("Settings")),
+        Binding("question_mark", "help", "? " + _("Help")),
         Binding("g", "bahasa", show=False, description="Language"),
-        Binding("plus", "zoom_in", show=False, description="Zoom in"),
-        Binding("minus", "zoom_out", show=False, description="Zoom out"),
-        Binding("x", "delete_track", show=False, description="Hapus"),
-        Binding("e", "enqueue", show=False, description="+Antrean"),
-        Binding("E", "dequeue", "−Antrean", show=False),
-        Binding("ctrl+up", "queue_up", "Naik", show=False),
-        Binding("ctrl+down", "queue_down", "Turun", show=False),
-        Binding("P", "play_queue", show=False, description="Putar antrean"),
-        Binding("S", "new_playlist", _("new album")),
-        Binding("A", "add_to_playlist", show=False, description="+ke album"),
-        Binding("X", "delete_playlist", "Hapus album", show=False),
-        Binding("D", "remove_from_album", "Hapus dari album", show=False),
-        Binding("r", "rescan", "Pindai ulang"),
-        Binding("q", "quit", _("Quit")),
+        Binding("x", "delete_track", show=False, description=_("Delete")),
+        Binding("e", "enqueue", show=False, description=_("Enqueue")),
+        Binding("E", "dequeue", _("Dequeue"), show=False),
+        Binding("ctrl+up", "queue_up", _("Move up"), show=False),
+        Binding("ctrl+down", "queue_down", _("Move down"), show=False),
+        Binding("P", "play_queue", show=False, description=_("Play queue")),
+        Binding("S", "new_playlist", _("new album"), show=False),
+        Binding("A", "add_to_playlist", show=False, description=_("Add to album")),
+        Binding("X", "delete_playlist", _("Delete album"), show=False),
+        Binding("D", "remove_from_album", _("Remove from album"), show=False),
+        Binding("r", "rescan", _("Rescan"), show=False),
+        Binding("q", "quit", _("Quit"), show=False),
     ]
 
     def __init__(self) -> None:
@@ -2175,6 +2355,18 @@ class MusicBox(App):
                     timeout=6)
         self.refresh_liked_table()
         self.load_library()
+
+    def action_settings(self) -> None:
+        self.push_screen(SettingsScreen())
+
+    def action_help(self) -> None:
+        """Daftar pintasan lengkap.
+
+        Memakai panel bawaan Textual, bukan daftar tulisan tangan: panel itu
+        dibangun dari BINDINGS yang sama yang dipakai aplikasi, jadi tidak bisa
+        menyimpang dari kenyataan seperti dokumentasi yang ditulis terpisah.
+        """
+        self.action_show_help_panel()
 
     def action_zoom_in(self) -> None:
         self._zoom(1)

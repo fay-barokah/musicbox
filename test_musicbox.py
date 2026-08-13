@@ -240,6 +240,60 @@ async def main():
         check("panel kosong memberi petunjuk", "Cari di YouTube" in petunjuk,
               petunjuk[:26].replace("\n", " "))
 
+        # Footer adalah pintu masuk, bukan katalog perintah. Semua aksi
+        # pemutaran sudah punya tombol berkotak tepat di atasnya.
+        tampil = [b for b in app.BINDINGS if getattr(b, "show", False)]
+        check("footer ringkas", len(tampil) <= 4, f"{len(tampil)} entri")
+        label = " ".join(b.description for b in tampil)
+        check("footer memuat Settings dan Help",
+              "Settings" in label and "Help" in label, label[:40])
+
+        # Tombol yang terikat dua kali membuat yang belakangan mati diam-diam —
+        # persis yang pernah terjadi pada plus/minus (volume vs kerapatan).
+        kunci = [b.key for b in app.BINDINGS]
+        ganda = {k for k in kunci if kunci.count(k) > 1}
+        check("tidak ada keybind bentrok", not ganda, str(ganda) or "bersih")
+        hilang = [b.action for b in app.BINDINGS
+                  if not hasattr(app, f"action_{b.action}")]
+        check("semua aksi terikat punya handler", not hilang, str(hilang) or "lengkap")
+
+        # Tidak boleh ada teks Indonesia bocor saat antarmuka berbahasa Inggris.
+        mod.simpan_bahasa("en")
+        bocor = [b.description for b in app.BINDINGS if b.description and
+                 any(w in b.description for w in
+                     ("Pindai", "Batal", "Kembali", "Antrean", "Naik", "Turun",
+                      "Hapus", "Putar", "Unduh", "Muat", "Urutkan", "Buang"))]
+        check("tidak ada teks Indonesia bocor di mode Inggris",
+              not bocor, str(bocor[:3]) or "bersih")
+
+        # Layar Settings: tiap kategori punya isi, dan opsinya benar-benar
+        # mengubah keadaan aplikasi (bukan sekadar menampilkan nilai).
+        app.action_settings()
+        await pilot.pause(0.8)
+        layar = app.screen
+        check("layar Settings terbuka", isinstance(layar, mod.SettingsScreen),
+              type(layar).__name__)
+        if isinstance(layar, mod.SettingsScreen):
+            for kat in layar.KATEGORI:
+                await layar._terapkan(f"nav:{kat}")
+                await pilot.pause(0.2)
+                check(f"kategori {kat} terisi", len(layar.query(".opsi")) >= 1)
+            await layar._terapkan("nav:Appearance")
+            await pilot.pause(0.2)
+            sebelum = app.cava_on
+            await layar._terapkan("cava")
+            await pilot.pause(0.3)
+            check("opsi Settings mengubah keadaan sungguhan",
+                  app.cava_on != sebelum, f"{sebelum} -> {app.cava_on}")
+            # Dikembalikan: tata letak panel bergantung pada cava, dan
+            # pemeriksaan kerapatan di bawah membaca tinggi sampul.
+            await layar._terapkan("cava")
+            await pilot.pause(0.3)
+            layar.action_close()
+            await pilot.pause(0.4)
+            check("bisa keluar dari Settings",
+                  not isinstance(app.screen, mod.SettingsScreen))
+
         # Bahasa: Inggris bawaan, terjemahan bekerja, teks asing tetap terbaca.
         mod.simpan_bahasa("en")
         check("bahasa bawaan Inggris", mod._("Search") == "Search")

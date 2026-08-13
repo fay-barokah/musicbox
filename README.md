@@ -51,7 +51,10 @@ kalau tersedia, dan jatuh ke palet cadangan kalau tidak.
   dengan penanda di bar kendali yang bisa diklik menuju daftar itu.
 - **Lagu disukai** (`l`) dan **rekomendasi** (`V`) yang disusun dari Mix YouTube
   milik lagu-lagu itu.
-- **Dua bahasa** — Inggris sebagai bawaan, Indonesia lewat `g`.
+- **Dua bahasa** — Inggris sebagai bawaan, Indonesia lewat `g` atau Settings.
+- **Setelan berkategori** (`,`) — tampilan, bahasa, pemutaran, kontrol, tentang.
+- **Daftar pintasan** (`?`) yang dibangun dari keybind aslinya, jadi tidak bisa
+  menyimpang dari kenyataan.
 
 ## Kebutuhan
 
@@ -112,7 +115,7 @@ python3 test_musicbox.py
 ```
 
 Memakai `run_test()` bawaan Textual, jadi tidak butuh terminal sungguhan.
-Memeriksa 104 hal: semua handler keybind ada dan tidak melempar exception,
+Memeriksa 117 hal: semua handler keybind ada dan tidak melempar exception,
 perpindahan tab, antrean, album, panel aksi kontekstual, ekstraksi sampul,
 perintah yang dikirim radio, pendaftaran MPRIS, sel progres unduhan, penguraian
 lirik, dan pemulihan setelah mpv dibunuh di tengah lagu.
@@ -195,6 +198,19 @@ waktu untuk ditemukan:
   bercampur dengan aliran event, jadi tiap permintaan dicocokkan lewat
   `request_id`; tanpa itu yang terbaca bisa peristiwa lain yang kebetulan lewat
   lebih dulu. Panel Radio membaca daftar putar mpv lewat jalur ini.
+- **Footer adalah pintu masuk, bukan katalog perintah.** Sebelumnya ia
+  mencetak sebelas pintasan yang semuanya sudah punya tombol berkotak tepat di
+  atasnya — dua kali kerja untuk mata, dan meluber di terminal sempit. Kini
+  tersisa `⚙ Settings` dan `? Help`; sisanya tetap berfungsi dan tetap muncul
+  lengkap di layar Help. Menguranginya, bukan mempercantiknya, yang membuat bar
+  itu terbaca.
+- **Setelan dikelompokkan sejak awal.** Satu daftar panjang akan terus memanjang
+  tiap ada opsi baru, dan yang jarang dipakai ikut menghalangi yang sering.
+  Kategori di kiri membuat tambahan berikutnya masuk ke kelompoknya.
+- **Uji memeriksa keybind bentrok.** `plus` sempat terikat dua kali — volume dan
+  kerapatan — dan yang belakangan mati diam-diam tanpa pesan apa pun. Suite
+  sekarang menolak keadaan itu, sekaligus memastikan tiap aksi yang diikat
+  benar-benar punya handler.
 - **`MUSICBOX_AO` memaksa keluaran audio.** Dipakai pengujian dengan nilai
   `null`. Tanpa itu suite berebut perangkat audio dengan musicbox yang sedang
   benar-benar dipakai mendengarkan musik, mpv gagal membuka stream
