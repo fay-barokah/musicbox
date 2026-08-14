@@ -1234,6 +1234,8 @@ def _(teks: str) -> str:
 # ------------------------------------------------------------------- lirik
 
 
+# Tingkat kerapatan tampilan, dipakai layar Setelan maupun notifikasinya.
+TINGKAT_KERAPATAN = ("compact", "normal", "roomy")
 LYRICS_CACHE = STATE_DIR / "lyrics"
 LIKED_FILE = STATE_DIR / "liked.json"
 # Embel-embel judul YouTube yang menyesatkan pencarian lirik: "(1 Hour)",
@@ -1896,10 +1898,13 @@ class SettingsScreen(ModalScreen[None]):
             return [
                 ("cava", _("Visualizer"), _("on") if app.cava_on else _("off"), True),
                 ("zoom", _("Density"),
-                 _(("compact", "normal", "roomy")[app.zoom]), True),
+                 _(TINGKAT_KERAPATAN[app.zoom]), True),
                 ("palette", _("Palette"),
                  _("follows wallpaper") if SCHEME_FILE.exists() else _("built-in"),
                  False),
+                # Ukuran huruf milik terminal, bukan aplikasi — dicatat di sini
+                # supaya tidak perlu diulang lewat notifikasi tiap kali.
+                ("font", _("Terminal font"), "Ctrl+plus / Ctrl+minus", False),
             ]
         if k == "Language":
             return [("lang", _("Language"),
@@ -2506,13 +2511,16 @@ class MusicBox(App):
         Ctrl+plus, Ctrl+minus, Ctrl+0, dan Ctrl+scroll.
         """
         self.zoom = max(0, min(2, self.zoom + arah))
-        nama = ("padat", "normal", "lapang")[self.zoom]
+        # Nama tingkatannya memakai kunci yang sama dengan layar Setelan.
+        # Dua daftar terpisah pasti menyimpang — dan yang satu sempat tertinggal
+        # dalam bahasa Indonesia sementara kalimat di sekelilingnya sudah Inggris.
+        nama = _(TINGKAT_KERAPATAN[self.zoom])
         for i in range(3):
             self.set_class(i == self.zoom, f"zoom-{i}")
         self._fit_info_panel()
-        self.notify(f"{_('view')}: {nama}  ·  "
-                    f"{_('Ctrl+plus / Ctrl+minus changes the terminal font size')}",
-                    timeout=6)
+        # Petunjuk soal huruf terminal tinggal di Setelan, bukan diulang tiap
+        # kali kerapatan diubah — notifikasi yang sama menumpuk empat baris.
+        self.notify(f"{_('view')}: {nama}", timeout=3)
 
     # -- lagu disukai ------------------------------------------------------
 

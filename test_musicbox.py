@@ -334,7 +334,15 @@ async def main():
         mod.simpan_bahasa("id")
         belum = [k for k in contoh if mod._(k) == k]
         check("notifikasi punya terjemahan", not belum, str(belum) or "lengkap")
+        # Nama tingkat kerapatan dipakai di dua tempat — notifikasi dan layar
+        # Setelan. Keduanya harus mengambil dari daftar yang sama, dan daftar
+        # itu harus punya terjemahan; salah satunya sempat tertinggal Indonesia
+        # sementara kalimat di sekelilingnya sudah Inggris.
+        tanpa = [t for t in mod.TINGKAT_KERAPATAN if mod._(t) == t and t != "normal"]
+        check("nama kerapatan punya terjemahan", not tanpa, str(tanpa) or "lengkap")
         mod.simpan_bahasa("en")
+        check("nama kerapatan berbahasa Inggris di mode Inggris",
+              mod._(mod.TINGKAT_KERAPATAN[0]) == "compact")
 
         # "?" bermuara ke overlay yang sama, langsung di kategori Kontrol —
         # bukan panel tempel terpisah yang berebut ruang dengan panel info.
