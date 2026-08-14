@@ -1079,7 +1079,7 @@ TERJEMAHAN = {
         "results for": "hasil untuk",
         "type above then press Enter": "ketik di atas lalu tekan Enter",
         "load more": "muat lebih banyak", "sort": "urutkan",
-        "nothing playing": "belum ada yang diputar",
+        "nothing playing": "tidak ada yang diputar",
         "done": "selesai", "failed": "gagal", "running": "berjalan",
         "left": "sisa",
         "songs": "lagu", "liked songs": "lagu disukai",
@@ -1146,6 +1146,45 @@ TERJEMAHAN = {
         "pick an album or a song inside it": "pilih album atau lagu di dalamnya",
         "already downloaded": "sudah diunduh",
         "Already in your library": "Sudah ada di library",
+        "view": "tampilan",
+        "Ctrl+plus / Ctrl+minus changes the terminal font size":
+            "Ctrl+plus / Ctrl+minus mengubah ukuran huruf terminal",
+        "highlight a song first": "sorot lagu dulu",
+        "already in liked songs": "sudah ada di daftar suka",
+        "liked": "disukai", "removed": "dibuang",
+        "like a few songs first": "sukai beberapa lagu dulu",
+        "recommendations need YouTube songs":
+            "rekomendasi butuh lagu dari YouTube",
+        "nothing playing yet": "belum ada yang diputar",
+        "mpv stopped unexpectedly — playback resumed":
+            "mpv berhenti mendadak — pemutaran disambung kembali",
+        "is empty. Download with": "kosong. Unduh dengan",
+        "search for something first": "cari sesuatu dulu",
+        "no results yet": "belum ada hasil",
+        "sorted by views": "urut: terbanyak ditonton",
+        "sorted by relevance": "urut: relevansi",
+        "queued": "antrean", "pick from Library or Search":
+            "pilih dari Library atau Cari",
+        "queue is empty": "antrean kosong",
+        "playing": "memutar", "looping": "diulang",
+        "invalid name": "nama tidak valid",
+        "name already used": "nama sudah dipakai",
+        "could not create": "gagal buat", "album created": "album dibuat",
+        "highlight a song in Library, Search, or Queue":
+            "sorot lagu di Library, Cari, atau Antrean",
+        "already in": "sudah ada di",
+        "highlight a song inside the album": "sorot lagunya di dalam album",
+        "removed from": "dihapus dari", "pick the album name":
+            "pilih nama albumnya",
+        "could not delete": "gagal hapus", "album deleted": "album dihapus",
+        "press x again to delete": "tekan x lagi untuk hapus",
+        "download finished": "unduhan selesai",
+        "songs added to library": "lagu masuk library",
+        "downloading": "unduh", "radio started": "radio dimulai",
+        "jumped to song": "lompat ke lagu", "shuffled": "diacak",
+        "library rescanned": "library dipindai",
+        "resumed at": "lanjut", "deleted": "dihapus",
+        "could not save": "gagal simpan",
         "press d again to download anyway":
             "tekan d sekali lagi untuk tetap mengunduh",
         "pick a search result first": "pilih hasil pencarian dulu",
@@ -2471,8 +2510,8 @@ class MusicBox(App):
         for i in range(3):
             self.set_class(i == self.zoom, f"zoom-{i}")
         self._fit_info_panel()
-        self.notify(f"tampilan: {nama}  ·  "
-                    "Ctrl+plus / Ctrl+minus mengubah ukuran huruf terminal",
+        self.notify(f"{_('view')}: {nama}  ·  "
+                    f"{_('Ctrl+plus / Ctrl+minus changes the terminal font size')}",
                     timeout=6)
 
     # -- lagu disukai ------------------------------------------------------
@@ -2517,17 +2556,17 @@ class MusicBox(App):
                         "source": "youtube" if str(st["path"]).startswith("http")
                                   else "lokal"}
         if not lagu:
-            self.notify("sorot lagu dulu", timeout=3)
+            self.notify(_("highlight a song first"), timeout=3)
             return
         if any(x.get("target") == lagu.get("target") for x in self.liked):
-            self.notify("sudah ada di daftar suka", timeout=2)
+            self.notify(_("already in liked songs"), timeout=2)
             return
         self.liked.insert(0, {"title": lagu.get("title", "?"),
                               "target": lagu.get("target", ""),
                               "source": lagu.get("source", "lokal")})
         self.save_liked()
         self.refresh_liked_table()
-        self.notify(f"♥ disukai ({len(self.liked)})", timeout=2)
+        self.notify(f"♥ {_('liked')} ({len(self.liked)})", timeout=2)
 
     def action_unlike(self) -> None:
         try:
@@ -2538,7 +2577,7 @@ class MusicBox(App):
             hilang = self.liked.pop(idx)
             self.save_liked()
             self.refresh_liked_table()
-            self.notify(f"dibuang: {hilang.get('title', '?')[:28]}", timeout=3)
+            self.notify(f"{_('removed')}: {hilang.get('title', '?')[:28]}", timeout=3)
 
     def action_rekomendasi(self) -> None:
         """Susun rekomendasi dari lagu-lagu yang disukai.
@@ -2550,11 +2589,11 @@ class MusicBox(App):
         dan jujur tentang dari mana asalnya.
         """
         if not self.liked:
-            self.notify("sukai beberapa lagu dulu", timeout=4)
+            self.notify(_("like a few songs first"), timeout=4)
             return
         benih = [x for x in self.liked if str(x.get("target", "")).startswith("http")]
         if not benih:
-            self.notify("rekomendasi butuh lagu dari YouTube", timeout=4)
+            self.notify(_("recommendations need YouTube songs"), timeout=4)
             return
         acak = random.sample(benih, min(3, len(benih)))
         punya = {Path(t["path"]).stem.lower() for t in self.library.tracks}
@@ -2615,7 +2654,7 @@ class MusicBox(App):
     def action_player(self) -> None:
         """Buka halaman pemutar penuh dengan lirik."""
         if not self.player.state.get("path"):
-            self.notify("belum ada yang diputar", timeout=3)
+            self.notify(_("nothing playing yet"), timeout=3)
             return
         self.push_screen(PlayerScreen())
 
@@ -2727,7 +2766,7 @@ class MusicBox(App):
         except Exception:
             return
         if revived:
-            self.notify("mpv berhenti mendadak — pemutaran disambung kembali",
+            self.notify(_("mpv stopped unexpectedly — playback resumed"),
                         severity="warning", timeout=5)
 
     # -- data -------------------------------------------------------------
@@ -2741,7 +2780,7 @@ class MusicBox(App):
                           t["artist"] or "—", fmt_time(t["duration"]))
         self.sub_title = f"library — {len(tracks)} lagu"
         if not tracks:
-            self.notify(f"{MUSIC_DIR} kosong. Unduh dengan: music -d \"judul\"",
+            self.notify(f"{MUSIC_DIR} {_('is empty. Download with')}: music -d \"title\"",
                         severity="warning", timeout=8)
 
     def _label_library(self, t: dict, path: str | None) -> str:
@@ -2862,7 +2901,7 @@ class MusicBox(App):
     def action_more_results(self) -> None:
         """Muat lebih banyak hasil untuk kueri yang sama."""
         if not self._query:
-            self.notify("cari sesuatu dulu", timeout=3)
+            self.notify(_("search for something first"), timeout=3)
             return
         if self._mencari:
             return
@@ -2872,12 +2911,11 @@ class MusicBox(App):
     def action_sort_results(self) -> None:
         """Ganti urutan hasil: bawaan YouTube ↔ paling banyak ditonton."""
         if not self.results:
-            self.notify("belum ada hasil", timeout=3)
+            self.notify(_("no results yet"), timeout=3)
             return
         self.sort_views = not self.sort_views
         self.refresh_results_table()
-        self.notify("urut: terbanyak ditonton" if self.sort_views
-                    else "urut: relevansi", timeout=3)
+        self.notify(_("sorted by views") if self.sort_views else _("sorted by relevance"), timeout=3)
 
     def refresh_results_table(self) -> None:
         table = self.query_one("#results", DataTable)
@@ -3342,7 +3380,7 @@ class MusicBox(App):
         self.queue.append({"title": title, "target": target, "source": source})
         self.save_queue()
         self.refresh_queue_table()
-        self.notify(f"antrean +1 ({len(self.queue)})", timeout=2)
+        self.notify(f"{_('queued')} +1 ({len(self.queue)})", timeout=2)
 
     def action_enqueue(self) -> None:
         """Tambah baris yang sedang disorot ke antrean."""
@@ -3362,7 +3400,7 @@ class MusicBox(App):
                 self._pending_add = item
                 self.enqueue(**item)
         else:
-            self.notify("pilih dari Library atau Cari", timeout=3)
+            self.notify(_("pick from Library or Search"), timeout=3)
 
     def action_dequeue(self) -> None:
         if self._active_table() != "queue":
@@ -3394,13 +3432,14 @@ class MusicBox(App):
     async def action_play_queue(self, loop: bool = False) -> None:
         """Putar antrean dari awal, sisanya diantrekan ke playlist mpv."""
         if not self.queue:
-            self.notify("antrean kosong", timeout=2)
+            self.notify(_("queue is empty"), timeout=2)
             return
         await self.player.set_loop(loop)
         await self.player.play(self.queue[0]["target"])
         for q in self.queue[1:]:
             await self.player.append(q["target"])
-        self.notify(f"memutar {len(self.queue)} lagu" + (" · diulang" if loop else ""),
+        self.notify(f"{_('playing')} {len(self.queue)} {_('songs')}"
+                    + (f" · {_('looping')}" if loop else ""),
                     timeout=2)
 
     # -- playlist tersimpan ------------------------------------------------
@@ -3448,20 +3487,20 @@ class MusicBox(App):
         # Nama file dibersihkan: hanya huruf, angka, spasi, strip.
         safe = "".join(c for c in name if c.isalnum() or c in " -_").strip()
         if not safe:
-            self.notify("nama tidak valid", severity="error", timeout=3)
+            self.notify(_("invalid name"), severity="error", timeout=3)
             return None
         target = PLAYLIST_DIR / f"{safe}.json"
         if target.exists():
-            self.notify("nama sudah dipakai", severity="warning", timeout=3)
+            self.notify(_("name already used"), severity="warning", timeout=3)
             return None
         PLAYLIST_DIR.mkdir(parents=True, exist_ok=True)
         try:
             target.write_text("[]")
         except OSError as exc:
-            self.notify(f"gagal buat: {exc}", severity="error", timeout=4)
+            self.notify(f"{_('could not create')}: {exc}", severity="error", timeout=4)
             return None
         self.load_playlists()
-        self.notify(f"album '{safe}' dibuat", timeout=3)
+        self.notify(f"{_('album created')}: {safe}", timeout=3)
         return safe
 
     def _current_playlist(self) -> str | None:
@@ -3509,7 +3548,7 @@ class MusicBox(App):
         """Tambahkan lagu yang disorot ke album — pilih tujuannya lewat dialog."""
         song = self._selected_song()
         if not song:
-            self.notify("sorot lagu di Library, Cari, atau Antrean", timeout=4)
+            self.notify(_("highlight a song in Library, Search, or Queue"), timeout=4)
             return
         self._pending_add = song
         self.push_screen(AlbumPicker(sorted(self.playlists)), self._add_to_album)
@@ -3536,22 +3575,22 @@ class MusicBox(App):
         # menekan tambah dua kali menghasilkan entri kembar yang membingungkan
         # saat diputar maupun dikeluarkan.
         if any(i.get("target") == item.get("target") for i in items):
-            self.notify(f"sudah ada di '{name}'", severity="warning", timeout=3)
+            self.notify(f"{_('already in')} '{name}'", severity="warning", timeout=3)
             return
         items.append(item)
         try:
             (PLAYLIST_DIR / f"{name}.json").write_text(json.dumps(items, indent=1))
         except OSError as exc:
-            self.notify(f"gagal simpan: {exc}", severity="error", timeout=4)
+            self.notify(f"{_('could not save')}: {exc}", severity="error", timeout=4)
             return
         self.load_playlists()
-        self.notify(f"+1 ke '{name}'", timeout=2)
+        self.notify(f"+1 → '{name}'", timeout=2)
 
     def action_remove_from_album(self) -> None:
         """Hapus satu lagu dari album (daun yang disorot di tree)."""
         node = self.query_one("#pltree", Tree).cursor_node
         if not node or not node.data or "item" not in node.data:
-            self.notify("sorot lagunya di dalam album", timeout=3)
+            self.notify(_("highlight a song inside the album"), timeout=3)
             return
         name = node.data["playlist"]
         target = node.data["item"].get("target")
@@ -3559,29 +3598,29 @@ class MusicBox(App):
         try:
             (PLAYLIST_DIR / f"{name}.json").write_text(json.dumps(items, indent=1))
         except OSError as exc:
-            self.notify(f"gagal simpan: {exc}", severity="error", timeout=4)
+            self.notify(f"{_('could not save')}: {exc}", severity="error", timeout=4)
             return
         self.load_playlists()
-        self.notify(f"dihapus dari '{name}'", timeout=2)
+        self.notify(f"{_('removed from')} '{name}'", timeout=2)
 
     def action_delete_playlist(self) -> None:
         node = self.query_one("#pltree", Tree).cursor_node
         if not node or not node.data or "item" in node.data:
-            self.notify("pilih nama playlist-nya", timeout=3)
+            self.notify(_("pick the album name"), timeout=3)
             return
         name = node.data["playlist"]
         if self._pending_delete == f"pl:{name}":
             try:
                 (PLAYLIST_DIR / f"{name}.json").unlink()
             except OSError as exc:
-                self.notify(f"gagal hapus: {exc}", severity="error", timeout=4)
+                self.notify(f"{_('could not delete')}: {exc}", severity="error", timeout=4)
                 return
             self._pending_delete = None
             self.load_playlists()
-            self.notify("playlist dihapus", timeout=2)
+            self.notify(_("album deleted"), timeout=2)
         else:
             self._pending_delete = f"pl:{name}"
-            self.notify("tekan x lagi untuk hapus", timeout=4)
+            self.notify(_("press x again to delete"), timeout=4)
             self.set_timer(4.0, lambda: setattr(self, "_pending_delete", None))
 
     async def on_tree_node_selected(self, event) -> None:
@@ -3647,10 +3686,10 @@ class MusicBox(App):
             self.load_library(force=True)
             baru = len(self.library.tracks) - sebelum
             if baru > 0:
-                self.notify(f"unduhan selesai · {baru} lagu masuk library",
+                self.notify(f"{_('download finished')} · {baru} {_('songs added to library')}",
                             timeout=4)
             else:
-                self.notify("unduhan selesai", timeout=3)
+                self.notify(_("download finished"), timeout=3)
         except Exception:
             pass
 
@@ -3733,7 +3772,7 @@ class MusicBox(App):
         url = yt_url(r["id"])
         cmd.append(url)
         fmt, title = self.dl_format, r["title"]
-        self.notify(f"unduh: {fmt}", timeout=3)
+        self.notify(f"{_('downloading')}: {fmt}", timeout=3)
         entry = {"title": title, "format": fmt, "status": "berjalan",
                  "url": url, "time": time.strftime("%H:%M"), "percent": 0.0}
         self.log_download(entry)
@@ -3761,15 +3800,15 @@ class MusicBox(App):
 
     def action_toggle_format(self) -> None:
         self.dl_format = "opus" if self.dl_format == "mp3" else "mp3"
-        self.notify(f"format: {self.dl_format}", timeout=2)
+        self.notify(f"{_('format')}: {self.dl_format}", timeout=2)
 
     async def action_radio(self) -> None:
         r = self._selected_result()
         if not r:
-            self.notify("pilih hasil pencarian dulu", timeout=3)
+            self.notify(_("pick a search result first"), timeout=3)
             return
         await self.player.play_radio(yt_radio_url(r["id"]))
-        self.notify("radio dimulai", timeout=2)
+        self.notify(_("radio started"), timeout=2)
 
     # -- pemutaran ---------------------------------------------------------
 
@@ -3778,7 +3817,7 @@ class MusicBox(App):
             idx = event.cursor_row
             if 0 <= idx < len(self.radio_list):
                 await self.player.play_index(idx)
-                self.notify(f"lompat ke lagu {idx + 1}", timeout=2)
+                self.notify(f"{_('jumped to song')} {idx + 1}", timeout=2)
                 self.call_after_refresh(
                     lambda: self.run_worker(self.refresh_radio(), exclusive=False))
             return
@@ -3843,7 +3882,7 @@ class MusicBox(App):
         await self.player.play(tracks[0]["path"])
         for t in tracks[1:]:
             await self.player.append(t["path"])
-        self.notify("diacak", timeout=2)
+        self.notify(_("shuffled"), timeout=2)
 
     def action_toggle_autoplay(self) -> None:
         self.autoplay = not self.autoplay
@@ -3851,7 +3890,7 @@ class MusicBox(App):
         btn.update("↻ " + (_("auto") if self.autoplay else _("off")))
         btn.set_class(self.autoplay, "on")
         btn.set_class(not self.autoplay, "off")
-        self.notify("autoplay on" if self.autoplay else "autoplay off", timeout=2)
+        self.notify(f"autoplay {_('on') if self.autoplay else _('off')}", timeout=2)
 
     def action_toggle_cava(self) -> None:
         """Sembunyikan visualizer sekaligus hentikan prosesnya.
@@ -3871,7 +3910,7 @@ class MusicBox(App):
             self.run_worker(cava.restart(), exclusive=False)
         else:
             cava.stop()
-        self.notify("cava on" if self.cava_on else "cava off", timeout=2)
+        self.notify(f"cava {_('on') if self.cava_on else _('off')}", timeout=2)
 
     async def action_toggle_pause(self) -> None:
         await self.player.toggle_pause()
@@ -3899,7 +3938,7 @@ class MusicBox(App):
 
     def action_rescan(self) -> None:
         self.load_library(force=True)
-        self.notify("library dipindai", timeout=2)
+        self.notify(_("library rescanned"), timeout=2)
 
     # -- lanjut dari terakhir ---------------------------------------------
 
@@ -3934,7 +3973,7 @@ class MusicBox(App):
         # Sengaja dimuat dalam keadaan JEDA: membuka aplikasi tidak seharusnya
         # langsung mengeluarkan suara. Tekan spasi untuk melanjutkan.
         await self.player.load_paused(path, pos)
-        self.notify(f"lanjut: {fmt_time(pos)}", timeout=3)
+        self.notify(f"{_('resumed at')}: {fmt_time(pos)}", timeout=3)
 
     def action_delete_track(self) -> None:
         table = self.query_one("#library", DataTable)
@@ -3946,15 +3985,15 @@ class MusicBox(App):
             try:
                 Path(track["path"]).unlink()
             except OSError as exc:
-                self.notify(f"gagal hapus: {exc}", severity="error", timeout=4)
+                self.notify(f"{_('could not delete')}: {exc}", severity="error", timeout=4)
                 return
             self._pending_delete = None
             self.load_library(force=True)
-            self.notify("dihapus", timeout=2)
+            self.notify(_("deleted"), timeout=2)
         else:
             # Konfirmasi dua langkah: menghapus file tidak bisa dibatalkan.
             self._pending_delete = track["path"]
-            self.notify("tekan x lagi untuk hapus", timeout=4)
+            self.notify(_("press x again to delete"), timeout=4)
             self.set_timer(4.0, lambda: setattr(self, "_pending_delete", None))
 
     def on_unmount(self) -> None:

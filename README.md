@@ -112,7 +112,7 @@ music -p                   tmux panel: menu + visualizer
 python3 test_musicbox.py
 ```
 
-Uses Textual's own `run_test()`, so no real terminal is needed. It checks 125
+Uses Textual's own `run_test()`, so no real terminal is needed. It checks 126
 things: every keybinding has a handler and raises nothing, tab switching, the
 queue, albums, the contextual action panel, cover extraction, the commands radio
 sends, MPRIS registration, the download progress cell, lyrics parsing, and

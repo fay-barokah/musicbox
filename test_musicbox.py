@@ -326,6 +326,16 @@ async def main():
         mod.simpan_bahasa("en")
         check("label panel info kembali Inggris", mod._("artist") == "artist")
 
+        # Notifikasi ikut bahasa juga — itu teks yang paling sering muncul
+        # sekilas, dan paling mudah tertinggal saat menambah fitur.
+        contoh = ["queue is empty", "download finished", "library rescanned",
+                  "sorted by views", "nothing playing yet", "shuffled",
+                  "radio started", "deleted"]
+        mod.simpan_bahasa("id")
+        belum = [k for k in contoh if mod._(k) == k]
+        check("notifikasi punya terjemahan", not belum, str(belum) or "lengkap")
+        mod.simpan_bahasa("en")
+
         # "?" bermuara ke overlay yang sama, langsung di kategori Kontrol —
         # bukan panel tempel terpisah yang berebut ruang dengan panel info.
         app.action_help()
